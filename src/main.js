@@ -1,5 +1,5 @@
 import "./styles.css";
-import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
+import { AMAP_KEY, AMAP_SECURITY_CODE, ZHIPU_API_ID, ZHIPU_API_KEY, ZHIPU_MODEL } from "./config";
 import { MapService } from "./mapService";
 import { loadHistoryRoutes, loadLayerState, removeHistoryRoute, saveLayerState, upsertHistoryRoute } from "./storage";
 import {
@@ -20,6 +20,10 @@ const TRAVEL_MODES = [
 ];
 
 const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
+const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
+const ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const AI_SYSTEM_PROMPT =
+  "你是简洁高效旅游行程助手，回复简洁、无多余内容。专注优化景点路线顺序、出行交通搭配，只给实用落地建议，不闲聊、不啰嗦、不用复杂格式，为每个地点之间推荐交通方式。推荐完路线后为该路线进行简要的说明理由和亮点介绍，并根据地点推荐路程最短的游玩路径";
 
 const app = document.getElementById("app");
 
@@ -30,6 +34,156 @@ function loadThemeMode() {
   } catch (error) {
     return "night";
   }
+}
+
+function loadAIChatMessages() {
+  try {
+    const raw = localStorage.getItem(AI_CHAT_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((item) => item && (item.role === "user" || item.role === "assistant") && typeof item.content === "string")
+      .slice(-80);
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveAIChatMessages(messages = []) {
+  try {
+    localStorage.setItem(AI_CHAT_STORAGE_KEY, JSON.stringify(messages));
+  } catch (error) {
+    console.warn("保存AI聊天记录失败", error);
+  }
+}
+
+function escapeHtml(text = "") {
+  const source = String(text);
+  return source.replace(/[&<>"']/g, (char) => {
+    const map = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    };
+    return map[char] || char;
+  });
+}
+
+function normalizeAIText(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        return item?.text || item?.content || "";
+      })
+      .join("")
+      .trim();
+  }
+
+  if (content && typeof content === "object") {
+    return String(content?.text || content?.content || "").trim();
+  }
+
+  return "";
+}
+
+function encodeBase64UrlFromBytes(bytes) {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function encodeBase64UrlFromJson(value) {
+  const encoded = new TextEncoder().encode(JSON.stringify(value));
+  return encodeBase64UrlFromBytes(encoded);
+}
+
+function resolveZhipuModel() {
+  if (ZHIPU_MODEL) {
+    return ZHIPU_MODEL;
+  }
+  if (ZHIPU_API_ID && ZHIPU_API_ID.startsWith("glm-")) {
+    return ZHIPU_API_ID;
+  }
+  return "glm-4-flash";
+}
+
+function resolveZhipuCredentials() {
+  const rawKey = ZHIPU_API_KEY;
+  const rawId = ZHIPU_API_ID;
+
+  if (!rawKey) {
+    throw new Error("尚未配置智谱API，请在 .env 中填写 VITE_ZHIPU_API_KEY");
+  }
+
+  if (rawKey.includes(".")) {
+    const [keyId, keySecret] = rawKey.split(".", 2);
+    if (keyId && keySecret) {
+      return { keyId, keySecret };
+    }
+  }
+
+  if (!rawId || rawId.startsWith("glm-")) {
+    throw new Error("智谱鉴权信息不完整：请使用 id.secret 形式的 VITE_ZHIPU_API_KEY，或填写 VITE_ZHIPU_API_ID + VITE_ZHIPU_API_KEY");
+  }
+
+  return {
+    keyId: rawId,
+    keySecret: rawKey
+  };
+}
+
+async function buildZhipuAuthorizationHeader() {
+  const { keyId, keySecret } = resolveZhipuCredentials();
+  const now = Math.floor(Date.now() / 1000);
+  const header = {
+    alg: "HS256",
+    sign_type: "SIGN"
+  };
+  const payload = {
+    api_key: keyId,
+    exp: now + 300,
+    timestamp: now
+  };
+
+  const headerPart = encodeBase64UrlFromJson(header);
+  const payloadPart = encodeBase64UrlFromJson(payload);
+  const signingInput = `${headerPart}.${payloadPart}`;
+
+  if (!window.crypto?.subtle) {
+    return `Bearer ${keyId}.${keySecret}`;
+  }
+
+  const cryptoKey = await window.crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(keySecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signatureBuffer = await window.crypto.subtle.sign(
+    "HMAC",
+    cryptoKey,
+    new TextEncoder().encode(signingInput)
+  );
+  const signaturePart = encodeBase64UrlFromBytes(new Uint8Array(signatureBuffer));
+
+  return `Bearer ${signingInput}.${signaturePart}`;
 }
 
 const state = {
@@ -46,6 +200,9 @@ const state = {
   historyRoutes: loadHistoryRoutes(),
   historyDetailId: null,
   historyOpen: false,
+  aiChatOpen: false,
+  aiChatPending: false,
+  aiChatMessages: loadAIChatMessages(),
   pickMode: null,
   toastTimer: null,
   mobileLeftOpen: false,
@@ -217,6 +374,224 @@ function setToast(message, type = "info") {
   }, 2600);
 }
 
+function pushAIChatMessage(role, content) {
+  const text = String(content || "").trim();
+  if (!text) {
+    return;
+  }
+  state.aiChatMessages.push({
+    id: createId("chat"),
+    role,
+    content: text,
+    createdAt: Date.now()
+  });
+  if (state.aiChatMessages.length > 80) {
+    state.aiChatMessages = state.aiChatMessages.slice(-80);
+  }
+  saveAIChatMessages(state.aiChatMessages);
+}
+
+function getEditorOverlayOpenState() {
+  const layer = getSelectedLayer();
+  const editorOpen = state.newRouteEditorOpen || Boolean(layer && layer.route && state.editorVisible);
+  return editorOpen || state.aiChatOpen;
+}
+
+async function requestZhipuReply(messages = []) {
+  const authorization = await buildZhipuAuthorizationHeader();
+  const model = resolveZhipuModel();
+
+  const payloadMessages = messages
+    .filter((item) => item && (item.role === "user" || item.role === "assistant") && typeof item.content === "string")
+    .slice(-20)
+    .map((item) => ({ role: item.role, content: item.content }));
+
+  const finalMessages = [{ role: "system", content: AI_SYSTEM_PROMPT }, ...payloadMessages];
+
+  const response = await fetch(ZHIPU_CHAT_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: authorization
+    },
+    body: JSON.stringify({
+      model,
+      messages: finalMessages
+    })
+  });
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`智谱请求失败（${response.status}）：${details.slice(0, 160)}`);
+  }
+
+  const data = await response.json();
+  const reply = normalizeAIText(data?.choices?.[0]?.message?.content);
+  if (!reply) {
+    throw new Error("智谱未返回有效回答");
+  }
+  return reply;
+}
+
+async function submitAIChat() {
+  if (state.aiChatPending) {
+    return;
+  }
+
+  const input = document.getElementById("ai-chat-input");
+  const question = String(input?.value || "").trim();
+  if (!question) {
+    return;
+  }
+
+  input.value = "";
+  pushAIChatMessage("user", question);
+  state.aiChatPending = true;
+  renderAIChatPanel();
+
+  try {
+    const answer = await requestZhipuReply(state.aiChatMessages);
+    pushAIChatMessage("assistant", answer);
+  } catch (error) {
+    pushAIChatMessage("assistant", `请求失败：${error.message || "未知错误"}`);
+  } finally {
+    state.aiChatPending = false;
+    renderAIChatPanel();
+  }
+}
+
+function toggleAIChatPanel() {
+  const nextOpen = !state.aiChatOpen;
+  state.aiChatOpen = nextOpen;
+
+  if (nextOpen) {
+    state.newRouteEditorOpen = false;
+    state.editorVisible = false;
+    state.mobileRightOpen = false;
+  }
+
+  renderRightPanel();
+  renderAIChatPanel();
+}
+
+function closeAIChatForRouteEdit() {
+  if (!state.aiChatOpen) {
+    return;
+  }
+  state.aiChatOpen = false;
+  renderAIChatPanel();
+}
+
+function handleAIChatAction(event) {
+  const target = event.target.closest("[data-ai-action]");
+  if (!target) {
+    return;
+  }
+
+  const action = target.dataset.aiAction;
+  if (action === "toggle") {
+    toggleAIChatPanel();
+    return;
+  }
+
+  if (action === "clear-history") {
+    if (!state.aiChatMessages.length) {
+      setToast("当前没有历史对话", "info");
+      return;
+    }
+
+    const ok = window.confirm("确认清除全部历史对话吗？");
+    if (!ok) {
+      return;
+    }
+
+    state.aiChatMessages = [];
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    setToast("历史对话已清除", "success");
+    return;
+  }
+
+  if (action === "send") {
+    submitAIChat();
+  }
+}
+
+function handleAIChatKeydown(event) {
+  if (event.target?.id !== "ai-chat-input") {
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    submitAIChat();
+  }
+}
+
+function renderAIChatPanel() {
+  const panel = document.getElementById("ai-chat-panel");
+  const aiBtn = document.getElementById("ai-chat-btn");
+  if (!panel) {
+    return;
+  }
+
+  aiBtn?.classList.toggle("active", state.aiChatOpen);
+
+  if (!state.aiChatOpen) {
+    panel.classList.add("floating-hidden");
+    panel.classList.remove("open-mobile");
+    panel.innerHTML = "";
+    setFloatingEditorState(getEditorOverlayOpenState());
+    return;
+  }
+
+  const messagesHtml = state.aiChatMessages.length
+    ? state.aiChatMessages
+        .map(
+          (message) => `
+            <article class="ai-chat-message ${message.role === "user" ? "user" : "assistant"}">
+              <p>${escapeHtml(message.content)}</p>
+            </article>
+          `
+        )
+        .join("")
+    : '<p class="muted ai-chat-empty">你好，我是你的路线助手。你可以问我路线规划、景点安排、出行建议等问题。</p>';
+
+  panel.classList.remove("floating-hidden");
+  panel.classList.add("open-mobile");
+  panel.innerHTML = `
+    <div class="panel-header">
+      <h2>AI 路线助手</h2>
+      <div class="panel-header-actions">
+        <button data-ai-action="clear-history" class="btn soft ai-chat-head-btn" type="button">清除历史</button>
+        <button data-ai-action="toggle" class="btn soft ai-chat-head-btn" type="button">关闭</button>
+      </div>
+    </div>
+
+    <div class="ai-chat-body">
+      <section class="panel-block ai-chat-thread-block">
+        <div class="ai-chat-messages">${messagesHtml}</div>
+      </section>
+
+      <section class="panel-block ai-chat-input-block">
+        <div class="ai-chat-composer">
+          <textarea id="ai-chat-input" rows="3" placeholder="输入内容，按 Enter 发送，Shift + Enter 换行" ${
+            state.aiChatPending ? "disabled" : ""
+          }></textarea>
+          <button data-ai-action="send" class="btn primary ai-chat-send-btn" type="button" ${
+            state.aiChatPending ? "disabled" : ""
+          }>${state.aiChatPending ? "思考中..." : "发送"}</button>
+        </div>
+      </section>
+    </div>
+  `;
+
+  setFloatingEditorState(true);
+  const messages = panel.querySelector(".ai-chat-messages");
+  if (messages) {
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+
 function buildLayout() {
   app.innerHTML = `
     <div class="app-shell">
@@ -230,6 +605,7 @@ function buildLayout() {
             <div class="search-input-wrap">
               <input id="search-input" type="text" placeholder="搜索景点、地点、商圈..." />
               <button id="search-btn" class="btn primary" type="button">搜索</button>
+              <button id="ai-chat-btn" class="btn primary" type="button">AI</button>
               <button id="theme-toggle-btn" class="btn ghost" type="button">${
                 getThemeToggleIcon(state.themeMode)
               }</button>
@@ -247,6 +623,7 @@ function buildLayout() {
         </div>
 
         <aside id="right-panel" class="side-panel right floating-hidden"></aside>
+  <aside id="ai-chat-panel" class="side-panel right ai-chat-panel floating-hidden"></aside>
 
         <div id="key-warning" class="key-warning hidden"></div>
         <div id="status-toast" class="status-toast"></div>
@@ -494,7 +871,7 @@ function renderRightPanel() {
   const hasSelectedRoute = Boolean(layer && layer.route && state.editorVisible && !showNewRouteEditor);
 
   if (!showNewRouteEditor && !hasSelectedRoute) {
-    setFloatingEditorState(false);
+    setFloatingEditorState(state.aiChatOpen);
     panel.innerHTML = "";
     return;
   }
@@ -1288,6 +1665,7 @@ function handleLeftPanelAction(event) {
   }
 
   if (action === "open-new-route-editor") {
+    closeAIChatForRouteEdit();
     state.newRouteEditorOpen = true;
     state.editorVisible = true;
     state.mobileRightOpen = true;
@@ -1297,6 +1675,7 @@ function handleLeftPanelAction(event) {
   }
 
   if (action === "layer-select") {
+    closeAIChatForRouteEdit();
     const nextId = target.dataset.layerId;
     const isSame = state.selectedLayerId === nextId;
     if (isSame && state.editorVisible && !state.newRouteEditorOpen) {
@@ -1463,6 +1842,7 @@ function handleRightPanelAction(event) {
   }
 
   if (action === "route-select") {
+    closeAIChatForRouteEdit();
     layer.selectedRouteId = target.dataset.routeId;
     state.editorVisible = true;
     state.newRouteEditorOpen = false;
@@ -1685,16 +2065,26 @@ async function doSearch() {
 
   try {
     state.searchResultsOpen = true;
-    const pois = await state.mapService.searchPOI(keyword);
+    const { pois, fallbackUsed, searchCity } = await state.mapService.searchPOI(keyword);
     state.searchResults = pois.slice(0, 8);
     renderSearchResults();
     state.mapService.renderSearchMarkers(state.searchResults, (poi) => {
       setToast(`已选中：${poi.name}`);
     });
+
+    const usedFallback = Boolean(fallbackUsed && searchCity);
+    const fallbackHint = usedFallback ? `当前城市“${searchCity}”未命中，已扩展到全国搜索` : "";
+
     if (!state.searchResults.length) {
-      setToast("未检索到结果", "warning");
+      setToast(fallbackHint ? `${fallbackHint}，仍未检索到结果` : "未检索到结果", "warning");
       return;
     }
+
+    if (usedFallback) {
+      setToast(fallbackHint, "info");
+      return;
+    }
+
     if (pois.length > 8) {
       setToast(`检索到 ${pois.length} 条，仅展示前 8 条`, "info");
     }
@@ -1753,7 +2143,9 @@ function handleSearchResultAction(event) {
 function bindEvents() {
   const leftPanel = document.getElementById("left-panel");
   const rightPanel = document.getElementById("right-panel");
+  const aiChatPanel = document.getElementById("ai-chat-panel");
   const searchBtn = document.getElementById("search-btn");
+  const aiChatBtn = document.getElementById("ai-chat-btn");
   const themeBtn = document.getElementById("theme-toggle-btn");
   const searchInput = document.getElementById("search-input");
   const searchResults = document.getElementById("search-results");
@@ -1771,8 +2163,13 @@ function bindEvents() {
   rightPanel.addEventListener("input", handleRightPanelAction);
   rightPanel.addEventListener("change", handleLeftPanelInput);
   rightPanel.addEventListener("input", handleLeftPanelInput);
+  aiChatPanel.addEventListener("click", handleAIChatAction);
+  aiChatPanel.addEventListener("keydown", handleAIChatKeydown);
 
   searchBtn.addEventListener("click", doSearch);
+  aiChatBtn?.addEventListener("click", () => {
+    toggleAIChatPanel();
+  });
   themeBtn?.addEventListener("click", () => {
     toggleThemeMode();
   });
@@ -1841,7 +2238,7 @@ async function initMap() {
     state.mapService.setThemeMode(state.themeMode);
     state.mapService.setMapClickHandler((point) => applyMapPick(point));
     const layer = getSelectedLayer();
-    const overlayOpen = state.newRouteEditorOpen || Boolean(layer && layer.route && state.editorVisible);
+    const overlayOpen = state.aiChatOpen || state.newRouteEditorOpen || Boolean(layer && layer.route && state.editorVisible);
     setFloatingEditorState(overlayOpen);
     rebuildLayers();
     setToast("地图加载成功", "success");
@@ -1864,6 +2261,7 @@ async function boot() {
   applyThemeMode(state.themeMode, false);
   renderLeftPanel();
   renderRightPanel();
+  renderAIChatPanel();
   renderSearchResults();
   renderHistoryOverlay();
   bindEvents();

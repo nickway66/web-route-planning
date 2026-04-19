@@ -169,6 +169,10 @@ function normalizeCityText(city) {
   return String(raw || "").trim();
 }
 
+function normalizeSearchCity(city) {
+  return normalizeCityText(city).replace(/市$/, "");
+}
+
 function collectTransitTools(plan = {}) {
   const tools = [];
   const pushed = new Set();
@@ -380,14 +384,117 @@ export class MapService {
     });
   }
 
-  async searchPOI(keyword) {
-    if (!this.placeSearch) {
-      throw new Error("地图还未初始化");
-    }
-    if (!keyword.trim()) {
-      return [];
+  getMapCenterPoint() {
+    if (!this.map || typeof this.map.getCenter !== "function") {
+      return null;
     }
 
+    const center = parseLngLatPoint(this.map.getCenter());
+    if (!Array.isArray(center)) {
+      return null;
+    }
+
+    return {
+      lng: center[0],
+      lat: center[1]
+    };
+  }
+
+  getMapBounds() {
+    if (!this.map || typeof this.map.getBounds !== "function") {
+      return null;
+    }
+    return this.map.getBounds();
+  }
+
+  async getSearchContext(preferredCity = "") {
+    const center = this.getMapCenterPoint();
+    const bounds = this.getMapBounds();
+    let city = normalizeSearchCity(preferredCity);
+
+    if (!city && center) {
+      try {
+        city = normalizeSearchCity(await this.reverseGeocodeCity(center));
+      } catch (error) {
+        console.warn("识别当前地图城市失败，改用全局检索", error);
+      }
+    }
+
+    return { city, center, bounds };
+  }
+
+  isLocationInBounds(location, bounds) {
+    if (!bounds || !Array.isArray(location) || location.length < 2 || typeof bounds.contains !== "function") {
+      return false;
+    }
+
+    const [lng, lat] = location;
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return false;
+    }
+
+    try {
+      if (window.AMap?.LngLat) {
+        return bounds.contains(new window.AMap.LngLat(lng, lat));
+      }
+      return bounds.contains([lng, lat]);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  getCenterDistance(location, center) {
+    if (!Array.isArray(location) || !center) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const dx = Number(location[0]) - Number(center.lng);
+    const dy = Number(location[1]) - Number(center.lat);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Math.hypot(dx, dy);
+  }
+
+  getCityMatchScore(poiCity, targetCity) {
+    const poi = normalizeSearchCity(poiCity);
+    const target = normalizeSearchCity(targetCity);
+    if (!poi || !target) {
+      return 0;
+    }
+    if (poi === target) {
+      return 2;
+    }
+    if (poi.includes(target) || target.includes(poi)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  prioritizeSearchResults(pois = [], context = {}) {
+    const city = normalizeSearchCity(context.city);
+    const bounds = context.bounds;
+    const center = context.center;
+
+    return [...pois].sort((a, b) => {
+      const aCityScore = this.getCityMatchScore(a.city, city);
+      const bCityScore = this.getCityMatchScore(b.city, city);
+      if (aCityScore !== bCityScore) {
+        return bCityScore - aCityScore;
+      }
+
+      const aInBounds = this.isLocationInBounds(a.location, bounds) ? 1 : 0;
+      const bInBounds = this.isLocationInBounds(b.location, bounds) ? 1 : 0;
+      if (aInBounds !== bInBounds) {
+        return bInBounds - aInBounds;
+      }
+
+      const aDistance = this.getCenterDistance(a.location, center);
+      const bDistance = this.getCenterDistance(b.location, center);
+      return aDistance - bDistance;
+    });
+  }
+
+  runPlaceSearch(keyword) {
     return new Promise((resolve, reject) => {
       this.placeSearch.search(keyword, (status, result) => {
         if (status !== "complete") {
@@ -406,6 +513,58 @@ export class MapService {
         resolve(pois.filter((item) => Array.isArray(item.location)));
       });
     });
+  }
+
+  async searchPOI(keyword) {
+    if (!this.placeSearch) {
+      throw new Error("地图还未初始化");
+    }
+    if (!keyword.trim()) {
+      return { pois: [], fallbackUsed: false, searchCity: "" };
+    }
+
+    const context = await this.getSearchContext();
+    const searchCity = context.city || "";
+
+    if (searchCity && typeof this.placeSearch.setCity === "function") {
+      this.placeSearch.setCity(searchCity);
+      if (typeof this.placeSearch.setCityLimit === "function") {
+        this.placeSearch.setCityLimit(true);
+      }
+
+      const cityPois = await this.runPlaceSearch(keyword);
+      if (cityPois.length) {
+        return {
+          pois: this.prioritizeSearchResults(cityPois, context),
+          fallbackUsed: false,
+          searchCity
+        };
+      }
+
+      if (typeof this.placeSearch.setCityLimit === "function") {
+        this.placeSearch.setCityLimit(false);
+      }
+      if (typeof this.placeSearch.setCity === "function") {
+        this.placeSearch.setCity("全国");
+      }
+
+      const fallbackPois = await this.runPlaceSearch(keyword);
+      return {
+        pois: this.prioritizeSearchResults(fallbackPois, { ...context, city: "" }),
+        fallbackUsed: true,
+        searchCity
+      };
+    }
+
+    if (typeof this.placeSearch.setCityLimit === "function") {
+      this.placeSearch.setCityLimit(false);
+    }
+    const pois = await this.runPlaceSearch(keyword);
+    return {
+      pois: this.prioritizeSearchResults(pois, context),
+      fallbackUsed: false,
+      searchCity: ""
+    };
   }
 
   clearSearchMarkers() {
