@@ -631,10 +631,6 @@ function renderRightPanel() {
         <input data-action="meta-change" data-field="name" value="${layer.meta.name}" />
       </label>
       <label>
-        出行天数
-        <input data-action="meta-change" data-field="days" type="number" min="1" value="${layer.meta.days}" />
-      </label>
-      <label>
         备注（可选）
         <textarea data-action="meta-change" data-field="note" rows="3">${layer.meta.note || ""}</textarea>
       </label>
@@ -1516,15 +1512,22 @@ function handleRightPanelAction(event) {
   }
 
   if (action === "meta-change") {
-    const field = target.dataset.field;
-    if (field === "days") {
-      layer.meta.days = Math.max(1, Number(target.value || 1));
-    } else {
-      layer.meta[field] = target.value;
+    if (event.type === "click") {
+      return;
     }
-    if (field === "name") {
+
+    const field = target.dataset.field;
+    layer.meta[field] = target.value;
+
+    if (field === "name" && (layer.routes || []).length === 1) {
+      layer.name = target.value || layer.name;
+    }
+
+    if (event.type === "change") {
+      renderLeftPanel();
       renderRightPanel();
     }
+
     persistLayersState();
     return;
   }
