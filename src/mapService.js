@@ -497,8 +497,14 @@ export class MapService {
   runPlaceSearch(keyword) {
     return new Promise((resolve, reject) => {
       this.placeSearch.search(keyword, (status, result) => {
+        if (status === "no_data") {
+          resolve([]);
+          return;
+        }
+
         if (status !== "complete") {
-          reject(new Error("POI 检索失败"));
+          const detail = String(result?.info || result?.infoText || "").trim();
+          reject(new Error(detail ? `POI 检索失败：${detail}` : "POI 检索失败"));
           return;
         }
 
@@ -515,7 +521,7 @@ export class MapService {
     });
   }
 
-  async searchPOI(keyword) {
+  async searchPOI(keyword, options = {}) {
     if (!this.placeSearch) {
       throw new Error("地图还未初始化");
     }
@@ -523,8 +529,19 @@ export class MapService {
       return { pois: [], fallbackUsed: false, searchCity: "" };
     }
 
-    const context = await this.getSearchContext();
-    const searchCity = context.city || "";
+    const preferredCity = normalizeSearchCity(options?.preferredCity || "");
+    const useMapCity = options?.useMapCity !== false;
+    const disableCityFallback = options?.disableCityFallback === true;
+
+    const context = useMapCity
+      ? await this.getSearchContext(preferredCity)
+      : {
+          city: preferredCity,
+          center: this.getMapCenterPoint(),
+          bounds: this.getMapBounds()
+        };
+
+    const searchCity = preferredCity || context.city || "";
 
     if (searchCity && typeof this.placeSearch.setCity === "function") {
       this.placeSearch.setCity(searchCity);
@@ -532,10 +549,24 @@ export class MapService {
         this.placeSearch.setCityLimit(true);
       }
 
-      const cityPois = await this.runPlaceSearch(keyword);
+      let cityPois = [];
+      try {
+        cityPois = await this.runPlaceSearch(keyword);
+      } catch (error) {
+        cityPois = [];
+      }
+
       if (cityPois.length) {
         return {
-          pois: this.prioritizeSearchResults(cityPois, context),
+          pois: this.prioritizeSearchResults(cityPois, { ...context, city: searchCity }),
+          fallbackUsed: false,
+          searchCity
+        };
+      }
+
+      if (disableCityFallback) {
+        return {
+          pois: [],
           fallbackUsed: false,
           searchCity
         };
@@ -545,7 +576,7 @@ export class MapService {
         this.placeSearch.setCityLimit(false);
       }
       if (typeof this.placeSearch.setCity === "function") {
-        this.placeSearch.setCity("全国");
+        this.placeSearch.setCity("");
       }
 
       const fallbackPois = await this.runPlaceSearch(keyword);

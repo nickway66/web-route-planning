@@ -23,7 +23,7 @@ const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
 const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
 const ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const AI_SYSTEM_PROMPT =
-  "你是简洁高效旅游行程助手，回复简洁、无多余内容。专注优化景点路线顺序、出行交通搭配，只给实用落地建议，不闲聊、不啰嗦、不用复杂格式，为每个地点之间推荐交通方式。推荐完路线后为该路线进行简要的说明理由和亮点介绍，并根据地点推荐路程最短的游玩路径";
+  "你是专业旅游路线规划AI，仅执行路线规划，遵守以下铁律：所有地点必须使用高德地图可识别的标准官方全称，禁止简称、俗称、别名；地点名称必须加英文双引号。只对路线地点加双引号，其他说明文字不要加引号。输出顺序示例：\"广州塔\" -> \"海心沙亚运公园\" -> \"沙面公园\"。";
 
 const app = document.getElementById("app");
 
@@ -98,6 +98,252 @@ function normalizeAIText(content) {
   }
 
   return "";
+}
+
+function extractQuotedPlaceNames(rawText = "") {
+  const text = String(rawText || "");
+  const quotePatterns = [/"([^"\n]{1,80})"/g];
+  const places = [];
+  let lastName = "";
+
+  for (const pattern of quotePatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const normalized = normalizeAIRoutePlaceName(match?.[1] || "")
+        .replace(/[，,。；;：:]+$/g, "")
+        .trim();
+
+      if (!normalized) {
+        continue;
+      }
+      if (!/[a-zA-Z\u4e00-\u9fa5]/.test(normalized)) {
+        continue;
+      }
+      if (normalized.length < 2) {
+        continue;
+      }
+      if (normalized === lastName) {
+        continue;
+      }
+
+      places.push(normalized);
+      lastName = normalized;
+      if (places.length >= 12) {
+        return places;
+      }
+    }
+  }
+
+  return places;
+}
+
+function parseAIPlannedPlaces(rawText = "") {
+  const text = String(rawText || "");
+  const places = extractQuotedPlaceNames(text);
+  const visibleText = text.trim();
+  return {
+    visibleText,
+    places: places.length >= 2 ? places : []
+  };
+}
+
+function getAIRouteActionLabel(status = "pending") {
+  if (status === "accepted") {
+    return "已添加到地图";
+  }
+  if (status === "rejected") {
+    return "已取消添加";
+  }
+  if (status === "failed") {
+    return "添加失败，可重试";
+  }
+  if (status === "processing") {
+    return "正在生成路线...";
+  }
+  return "是否将路线添加至地图？";
+}
+
+function normalizeAIRoutePlaceName(name = "") {
+  return String(name || "")
+    .trim()
+    .replace(/^[\d一二三四五六七八九十]+[\.、\)）\-\s]*/, "")
+    .replace(/^(起点|终点)\s*[:：]/, "")
+    .replace(/\s*(?:\(|（)\s*(?:地铁|公交|驾车|步行|骑行|约|分钟|小时|公里)[^\)）]*(?:\)|）)\s*/g, "")
+    .trim();
+}
+
+function normalizePlaceForCompare(name = "") {
+  return normalizeAIRoutePlaceName(name)
+    .toLowerCase()
+    .replace(/[\s·・\-—_（）()【】\[\]{}<>《》'"`~!@#$%^&*,，。；;：:\/\\|?]/g, "");
+}
+
+function scoreRoutePOICandidate(poi, targetName, preferredCity = "") {
+  const target = normalizePlaceForCompare(targetName);
+  const poiName = normalizePlaceForCompare(poi?.name || "");
+  const poiAddress = normalizePlaceForCompare(poi?.address || "");
+  const poiCity = normalizeTransitCity(poi?.city || "");
+  const city = normalizeTransitCity(preferredCity || "");
+
+  let score = 0;
+
+  if (target && poiName) {
+    if (poiName === target) {
+      score += 120;
+    } else if (poiName.includes(target) || target.includes(poiName)) {
+      score += 70;
+    }
+  }
+
+  if (target && poiAddress && poiAddress.includes(target)) {
+    score += 20;
+  }
+
+  if (city) {
+    if (poiCity === city) {
+      score += 45;
+    } else if (poiCity && (poiCity.includes(city) || city.includes(poiCity))) {
+      score += 25;
+    } else {
+      score -= 15;
+    }
+  }
+
+  const lengthGap = Math.abs((poiName || "").length - (target || "").length);
+  score -= Math.min(20, lengthGap);
+
+  return score;
+}
+
+function pickBestRoutePOI(pois = [], targetName = "", preferredCity = "") {
+  if (!Array.isArray(pois) || !pois.length) {
+    return null;
+  }
+
+  const scored = pois
+    .map((poi) => ({
+      poi,
+      score: scoreRoutePOICandidate(poi, targetName, preferredCity)
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best) {
+    return null;
+  }
+
+  const city = normalizeTransitCity(preferredCity || "");
+  const bestCity = normalizeTransitCity(best.poi?.city || "");
+  if (city && bestCity && bestCity !== city && best.score < 130) {
+    return null;
+  }
+
+  if (best.score < 45) {
+    return null;
+  }
+
+  return best.poi;
+}
+
+function extractCityFromText(text = "") {
+  const source = String(text || "");
+  const bySuffix = source.match(/([\u4e00-\u9fa5]{2,8})(?:市|特别行政区|自治区)/);
+  if (bySuffix?.[1]) {
+    return normalizeTransitCity(bySuffix[1]);
+  }
+
+  const cityList = [
+    "北京",
+    "上海",
+    "广州",
+    "深圳",
+    "成都",
+    "重庆",
+    "天津",
+    "武汉",
+    "西安",
+    "杭州",
+    "南京",
+    "苏州",
+    "长沙",
+    "郑州",
+    "青岛",
+    "厦门",
+    "福州",
+    "昆明",
+    "大连",
+    "沈阳",
+    "哈尔滨",
+    "长春",
+    "济南",
+    "合肥",
+    "南昌",
+    "南宁",
+    "海口",
+    "三亚",
+    "贵阳",
+    "兰州",
+    "银川",
+    "西宁",
+    "拉萨",
+    "乌鲁木齐",
+    "呼和浩特",
+    "石家庄",
+    "太原",
+    "宁波",
+    "无锡",
+    "佛山",
+    "东莞"
+  ];
+
+  const escaped = cityList.map((city) => city.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const travelIntentRegex = new RegExp(`(?:^|[\\s，,。；;：:【\[（(])(${escaped})(?:\\s*)(?:一日游|二日游|三日游|路线|行程|旅游|旅行|攻略|打卡)`, "i");
+  const travelMatched = source.match(travelIntentRegex);
+  if (travelMatched?.[1]) {
+    return normalizeTransitCity(travelMatched[1]);
+  }
+
+  return "";
+}
+
+async function inferAIRouteCity(placeNames = [], textContext = "") {
+  const cityFromText = extractCityFromText(textContext);
+
+  const counter = new Map();
+  const seeds = placeNames.slice(0, 4);
+  for (const rawName of seeds) {
+    const name = normalizeAIRoutePlaceName(rawName);
+    if (!name) {
+      continue;
+    }
+
+    try {
+      const { pois } = await state.mapService.searchPOI(name, { useMapCity: false });
+      pois.slice(0, 3).forEach((poi) => {
+        const city = normalizeTransitCity(poi.city || "");
+        if (!city) {
+          return;
+        }
+        counter.set(city, (counter.get(city) || 0) + 1);
+      });
+    } catch (error) {
+      continue;
+    }
+  }
+
+  let bestCity = "";
+  let bestScore = 0;
+  counter.forEach((score, city) => {
+    if (score > bestScore) {
+      bestScore = score;
+      bestCity = city;
+    }
+  });
+
+  if (cityFromText && bestCity && cityFromText !== bestCity && bestScore >= 2) {
+    return bestCity;
+  }
+
+  return cityFromText || bestCity;
 }
 
 function encodeBase64UrlFromBytes(bytes) {
@@ -374,7 +620,7 @@ function setToast(message, type = "info") {
   }, 2600);
 }
 
-function pushAIChatMessage(role, content) {
+function pushAIChatMessage(role, content, extras = {}) {
   const text = String(content || "").trim();
   if (!text) {
     return;
@@ -383,7 +629,8 @@ function pushAIChatMessage(role, content) {
     id: createId("chat"),
     role,
     content: text,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    ...extras
   });
   if (state.aiChatMessages.length > 80) {
     state.aiChatMessages = state.aiChatMessages.slice(-80);
@@ -451,7 +698,16 @@ async function submitAIChat() {
 
   try {
     const answer = await requestZhipuReply(state.aiChatMessages);
-    pushAIChatMessage("assistant", answer);
+    const parsed = parseAIPlannedPlaces(answer);
+    if (parsed.places.length >= 2) {
+      const assistantContent = `${parsed.visibleText}\n\n${getAIRouteActionLabel("pending")}`;
+      pushAIChatMessage("assistant", assistantContent, {
+        routePlaces: parsed.places,
+        routeActionStatus: "pending"
+      });
+    } else {
+      pushAIChatMessage("assistant", parsed.visibleText || answer);
+    }
   } catch (error) {
     pushAIChatMessage("assistant", `请求失败：${error.message || "未知错误"}`);
   } finally {
@@ -514,6 +770,263 @@ function handleAIChatAction(event) {
 
   if (action === "send") {
     submitAIChat();
+    return;
+  }
+
+  if (action === "apply-route-yes") {
+    const messageId = target.dataset.messageId;
+    applyAIRouteToMap(messageId);
+    return;
+  }
+
+  if (action === "apply-route-no") {
+    const messageId = target.dataset.messageId;
+    const message = state.aiChatMessages.find((item) => item.id === messageId);
+    if (!message || message.role !== "assistant" || message.routeActionStatus !== "pending") {
+      return;
+    }
+    message.routeActionStatus = "rejected";
+    message.content = message.content.replace(/\n\n[^\n]*$/, `\n\n${getAIRouteActionLabel("rejected")}`);
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    return;
+  }
+}
+
+function updateRouteActionMessage(message, status, extraMessage = "") {
+  const tail = getAIRouteActionLabel(status);
+  const base = String(message.content || "").replace(/\n\n[^\n]*$/, "").trim();
+  message.routeActionStatus = status;
+  message.content = `${base}\n\n${tail}${extraMessage ? `（${extraMessage}）` : ""}`;
+}
+
+function getRouteModeLabel(mode = "driving") {
+  if (mode === "walking") {
+    return "步行";
+  }
+  if (mode === "riding") {
+    return "骑行";
+  }
+  if (mode === "transit") {
+    return "公共交通";
+  }
+  return "驾车";
+}
+
+function getAIRouteFallbackModes(fromPoint, toPoint, preferredMode = "driving") {
+  const queue = [preferredMode, "driving", "riding", "walking"];
+  const fromCity = normalizeTransitCity(fromPoint?.city || "");
+  const toCity = normalizeTransitCity(toPoint?.city || "");
+
+  if (fromCity && toCity && fromCity === toCity) {
+    queue.push("transit");
+  }
+
+  return [...new Set(queue)];
+}
+
+async function planAIRouteSegmentsWithFallback(points = [], preferredMode = "driving", transitCity = "成都") {
+  const segments = [];
+  const segmentModes = [];
+  const degraded = [];
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const fromPoint = points[i];
+    const toPoint = points[i + 1];
+    const from = [fromPoint.lng, fromPoint.lat];
+    const to = [toPoint.lng, toPoint.lat];
+    const candidateModes = getAIRouteFallbackModes(fromPoint, toPoint, preferredMode);
+
+    let planned = null;
+    let usedMode = preferredMode;
+    let lastError = null;
+
+    for (const mode of candidateModes) {
+      try {
+        planned = await state.mapService.planSegment(from, to, mode, transitCity);
+        usedMode = mode;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (!planned) {
+      throw new Error(`第${i + 1}段规划失败：${lastError?.message || "未知错误"}`);
+    }
+
+    segments.push(planned);
+    segmentModes.push(usedMode);
+
+    if (usedMode !== preferredMode) {
+      degraded.push(`${i + 1}段改为${getRouteModeLabel(usedMode)}`);
+    }
+  }
+
+  return { segments, segmentModes, degraded };
+}
+
+async function buildRoutePointsFromPlaces(placeNames = [], options = {}) {
+  const points = [];
+  const misses = [];
+  const preferredCity = normalizeTransitCity(options?.preferredCity || "");
+
+  for (const rawName of placeNames) {
+    const name = normalizeAIRoutePlaceName(rawName);
+    if (!name) {
+      misses.push(String(rawName || ""));
+      continue;
+    }
+
+    let pois = [];
+    try {
+      const queries = [name];
+      if (preferredCity && !name.startsWith(preferredCity)) {
+        queries.unshift(`${preferredCity}${name}`);
+      }
+
+      for (const query of queries) {
+        const result = await state.mapService.searchPOI(
+          query,
+          preferredCity
+            ? {
+                preferredCity,
+                useMapCity: false,
+                disableCityFallback: true
+              }
+            : {
+                useMapCity: false
+              }
+        );
+        const currentPois = Array.isArray(result?.pois) ? result.pois : [];
+        if (currentPois.length) {
+          pois = currentPois;
+          break;
+        }
+      }
+
+      if (!pois.length && preferredCity) {
+        const fallback = await state.mapService.searchPOI(name, { useMapCity: false });
+        pois = Array.isArray(fallback?.pois) ? fallback.pois : [];
+      }
+    } catch (error) {
+      misses.push(name);
+      continue;
+    }
+
+    const poi = pickBestRoutePOI(pois, name, preferredCity);
+    if (!poi) {
+      misses.push(name);
+      continue;
+    }
+    points.push(
+      createPoint({
+        name: poi.name || name,
+        lng: poi.location[0],
+        lat: poi.location[1],
+        address: poi.address,
+        city: poi.city
+      })
+    );
+  }
+
+  return { points, misses };
+}
+
+async function applyAIRouteToMap(messageId) {
+  const messageIndex = state.aiChatMessages.findIndex((item) => item.id === messageId);
+  const message = messageIndex >= 0 ? state.aiChatMessages[messageIndex] : null;
+  if (!message || message.role !== "assistant") {
+    return;
+  }
+  if (message.routeActionStatus !== "pending") {
+    return;
+  }
+  if (!isMapReady()) {
+    setToast("地图尚未加载完成", "warning");
+    return;
+  }
+
+  const routePlaces = Array.isArray(message.routePlaces) ? message.routePlaces : [];
+  if (routePlaces.length < 2) {
+    updateRouteActionMessage(message, "failed", "地点不足");
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    return;
+  }
+
+  updateRouteActionMessage(message, "processing");
+  saveAIChatMessages(state.aiChatMessages);
+  renderAIChatPanel();
+
+  try {
+    let latestUserPrompt = "";
+    for (let i = messageIndex - 1; i >= 0; i -= 1) {
+      const item = state.aiChatMessages[i];
+      if (item?.role === "user" && typeof item.content === "string" && item.content.trim()) {
+        latestUserPrompt = item.content.trim();
+        break;
+      }
+    }
+
+    const inferContext = [latestUserPrompt, message.content].filter(Boolean).join("\n");
+    const inferredCity = await inferAIRouteCity(routePlaces, inferContext);
+    const { points, misses } = await buildRoutePointsFromPlaces(routePlaces, {
+      preferredCity: inferredCity
+    });
+    if (points.length < 2) {
+      throw new Error("可识别地点不足，无法生成路线");
+    }
+
+    const preferredMode = "driving";
+    const transitCity = normalizeTransitCity(points[0]?.city || state.draft.transitCity) || "成都";
+    const { segments, segmentModes, degraded } = await planAIRouteSegmentsWithFallback(
+      points,
+      preferredMode,
+      transitCity
+    );
+
+    const layerName = nextLayerName(state.layers);
+    const route = createRouteRecord({
+      points,
+      segmentModes,
+      segments,
+      name: layerName
+    });
+    const layer = createLayerWithRoute(route, layerName);
+
+    state.layers.push(layer);
+    state.selectedLayerId = layer.id;
+    state.editorVisible = true;
+    state.newRouteEditorOpen = false;
+    state.mobileRightOpen = false;
+
+    rebuildLayers();
+    state.mapService.fitLayers([layer]);
+    persistLayersState();
+    renderLeftPanel();
+    renderRightPanel();
+
+    const notes = [];
+    if (inferredCity) {
+      notes.push(`目标城市：${inferredCity}`);
+    }
+    if (misses.length) {
+      notes.push(`未命中：${misses.join("、")}`);
+    }
+    if (degraded.length) {
+      notes.push(degraded.join("，"));
+    }
+
+    updateRouteActionMessage(message, "accepted", notes.join("；"));
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    setToast(`AI路线已添加：${layer.name}`, "success");
+  } catch (error) {
+    updateRouteActionMessage(message, "failed", error.message || "未知错误");
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    setToast(error.message || "AI路线添加失败", "danger");
   }
 }
 
@@ -549,7 +1062,29 @@ function renderAIChatPanel() {
         .map(
           (message) => `
             <article class="ai-chat-message ${message.role === "user" ? "user" : "assistant"}">
-              <p>${escapeHtml(message.content)}</p>
+              <div class="ai-chat-message-content">
+                <p>${escapeHtml(message.content)}</p>
+                ${
+                  message.role === "assistant" && Array.isArray(message.routePlaces) && message.routePlaces.length >= 2
+                    ? `<div class="ai-route-actions">
+                        <button
+                          data-ai-action="apply-route-yes"
+                          data-message-id="${message.id}"
+                          class="btn tiny"
+                          type="button"
+                          ${message.routeActionStatus !== "pending" ? "disabled" : ""}
+                        >是</button>
+                        <button
+                          data-ai-action="apply-route-no"
+                          data-message-id="${message.id}"
+                          class="btn tiny soft"
+                          type="button"
+                          ${message.routeActionStatus !== "pending" ? "disabled" : ""}
+                        >否</button>
+                      </div>`
+                    : ""
+                }
+              </div>
             </article>
           `
         )

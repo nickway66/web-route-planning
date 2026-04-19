@@ -882,6 +882,23 @@ label {
   word-break: break-word;
 }
 
+.ai-chat-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.ai-route-actions {
+  display: inline-flex;
+  gap: 8px;
+  padding-left: 2px;
+}
+
+.ai-route-actions .btn {
+  min-width: 44px;
+}
+
 .ai-chat-message.user {
   justify-content: flex-end;
 }
