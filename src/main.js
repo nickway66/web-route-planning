@@ -23,9 +23,24 @@ const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
 const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
 const ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const AI_SYSTEM_PROMPT =
-  "你是专业旅游路线规划AI，仅执行路线规划，遵守以下铁律：所有地点必须使用高德地图可识别的标准官方全称，禁止简称、俗称、别名；地点名称必须加英文双引号。只对路线地点加双引号，其他说明文字不要加引号。输出顺序示例：\"广州塔\" -> \"海心沙亚运公园\" -> \"沙面公园\"。";
+  "你是专业旅游路线规划AI，仅执行路线规划，遵守以下铁律：所有地点必须使用高德地图可识别的标准官方全称，禁止简称、俗称、别名；地点名称必须加英文双引号。只对路线地点加双引号，其他说明文字不要加引号而后在每个地点后添加游玩时间，景点简要介绍以及预估消费金额。如果用户要求两日或多日游玩路线，则每日为一条路线。输出顺序示例：\"广州塔\"\n预估游玩三小时\n门票150-220元\n营业时间9:00-22:30\n中国第一高塔，白天可远眺珠江两岸，傍晚可拍美丽落日 \n \"海心沙亚运公园\" \n预估游玩一小时\n免费开放\n营业时间：15:00-22:00\n 由亚运场馆改造的免费公园，可同时拍到落日、花海与广州塔同框。 \n\"广州圣心大教堂\"\n预估游玩一小时\n免费开放\n营业时间：09:00-14:30/15:00-17:00。\n 全球四座全石结构哥特式教堂之一，宛如东方巴黎圣母院。建议在外拍摄建筑全景和细节，夕阳下更显庄严美丽。\n";
 
 const app = document.getElementById("app");
+
+const CN_DAY_NUMBER_MAP = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10
+};
 
 function loadThemeMode() {
   try {
@@ -136,13 +151,100 @@ function extractQuotedPlaceNames(rawText = "") {
   return places;
 }
 
+function parseDayOrderToken(token = "") {
+  const text = String(token || "").trim();
+  if (!text) {
+    return 0;
+  }
+
+  const digit = Number.parseInt(text, 10);
+  if (Number.isFinite(digit)) {
+    return digit;
+  }
+
+  if (text === "十") {
+    return 10;
+  }
+
+  const tenIndex = text.indexOf("十");
+  if (tenIndex >= 0) {
+    const leftRaw = text.slice(0, tenIndex);
+    const rightRaw = text.slice(tenIndex + 1);
+    const left = leftRaw ? CN_DAY_NUMBER_MAP[leftRaw] || 0 : 1;
+    const right = rightRaw ? CN_DAY_NUMBER_MAP[rightRaw] || 0 : 0;
+    return left * 10 + right;
+  }
+
+  return CN_DAY_NUMBER_MAP[text] || 0;
+}
+
+function extractDailyQuotedPlacePlans(rawText = "") {
+  const text = String(rawText || "");
+  const lines = text.split(/\r?\n/);
+  const dayPlans = [];
+  let currentDayIndex = -1;
+  let hasDayMarker = false;
+
+  const ensureDayPlan = (index) => {
+    while (dayPlans.length <= index) {
+      dayPlans.push([]);
+    }
+  };
+
+  lines.forEach((line) => {
+    const dayMatch = line.match(/(?:第\s*([零一二三四五六七八九十两\d]+)\s*天|day\s*([0-9]+)|d\s*([0-9]+))/i);
+    if (dayMatch) {
+      hasDayMarker = true;
+      const token = dayMatch[1] || dayMatch[2] || dayMatch[3] || "";
+      const dayNumber = parseDayOrderToken(token);
+      currentDayIndex = dayNumber > 0 ? Math.min(dayNumber - 1, 29) : dayPlans.length;
+      ensureDayPlan(currentDayIndex);
+    }
+
+    const linePlaces = extractQuotedPlaceNames(line);
+    if (!linePlaces.length) {
+      return;
+    }
+
+    if (currentDayIndex < 0) {
+      currentDayIndex = 0;
+      ensureDayPlan(currentDayIndex);
+    }
+
+    const currentDayPlaces = dayPlans[currentDayIndex];
+    linePlaces.forEach((name) => {
+      if (currentDayPlaces[currentDayPlaces.length - 1] !== name) {
+        currentDayPlaces.push(name);
+      }
+    });
+  });
+
+  const cleaned = dayPlans
+    .map((places) => places.filter((name) => Boolean(name && String(name).trim())))
+    .filter((places) => places.length >= 2)
+    .slice(0, 10);
+
+  if (hasDayMarker && cleaned.length >= 2) {
+    return cleaned;
+  }
+
+  const fallback = extractQuotedPlaceNames(text);
+  if (fallback.length >= 2) {
+    return [fallback];
+  }
+
+  return [];
+}
+
 function parseAIPlannedPlaces(rawText = "") {
   const text = String(rawText || "");
-  const places = extractQuotedPlaceNames(text);
+  const dayPlans = extractDailyQuotedPlacePlans(text);
+  const places = dayPlans.flat();
   const visibleText = text.trim();
   return {
     visibleText,
-    places: places.length >= 2 ? places : []
+    places: places.length >= 2 ? places : [],
+    dayPlans
   };
 }
 
@@ -703,6 +805,7 @@ async function submitAIChat() {
       const assistantContent = `${parsed.visibleText}\n\n${getAIRouteActionLabel("pending")}`;
       pushAIChatMessage("assistant", assistantContent, {
         routePlaces: parsed.places,
+        routeDayPlans: parsed.dayPlans,
         routeActionStatus: "pending"
       });
     } else {
@@ -948,7 +1051,13 @@ async function applyAIRouteToMap(messageId) {
   }
 
   const routePlaces = Array.isArray(message.routePlaces) ? message.routePlaces : [];
-  if (routePlaces.length < 2) {
+  const routeDayPlansRaw = Array.isArray(message.routeDayPlans) ? message.routeDayPlans : [];
+  const routeDayPlans = (routeDayPlansRaw.length ? routeDayPlansRaw : [routePlaces])
+    .map((plan) => (Array.isArray(plan) ? plan.map((name) => normalizeAIRoutePlaceName(name)).filter(Boolean) : []))
+    .filter((plan) => plan.length >= 2)
+    .slice(0, 10);
+
+  if (routeDayPlans.length < 1) {
     updateRouteActionMessage(message, "failed", "地点不足");
     saveAIChatMessages(state.aiChatMessages);
     renderAIChatPanel();
@@ -970,39 +1079,69 @@ async function applyAIRouteToMap(messageId) {
     }
 
     const inferContext = [latestUserPrompt, message.content].filter(Boolean).join("\n");
-    const inferredCity = await inferAIRouteCity(routePlaces, inferContext);
-    const { points, misses } = await buildRoutePointsFromPlaces(routePlaces, {
-      preferredCity: inferredCity
-    });
-    if (points.length < 2) {
+    const inferPlaces = routeDayPlans.flat();
+    const inferredCity = await inferAIRouteCity(inferPlaces, inferContext);
+
+    const layerName = nextLayerName(state.layers);
+    const builtLayers = [];
+    const missedByDay = [];
+    const degradedByDay = [];
+    const skippedDays = [];
+    const usedColors = state.layers.map((item) => item.color);
+
+    for (let dayIndex = 0; dayIndex < routeDayPlans.length; dayIndex += 1) {
+      const dayPlaces = routeDayPlans[dayIndex];
+      const { points, misses } = await buildRoutePointsFromPlaces(dayPlaces, {
+        preferredCity: inferredCity
+      });
+
+      if (misses.length) {
+        missedByDay.push(`第${dayIndex + 1}天未命中：${misses.join("、")}`);
+      }
+
+      if (points.length < 2) {
+        skippedDays.push(`第${dayIndex + 1}天`);
+        continue;
+      }
+
+      const preferredMode = "driving";
+      const transitCity = normalizeTransitCity(points[0]?.city || state.draft.transitCity) || "成都";
+      const { segments, segmentModes, degraded } = await planAIRouteSegmentsWithFallback(
+        points,
+        preferredMode,
+        transitCity
+      );
+
+      if (degraded.length) {
+        degradedByDay.push(`第${dayIndex + 1}天：${degraded.join("，")}`);
+      }
+
+      const routeName = routeDayPlans.length > 1 ? `${layerName}-第${dayIndex + 1}天` : layerName;
+      const route = createRouteRecord({
+        points,
+        segmentModes,
+        segments,
+        name: routeName
+      });
+
+      const dayColor = pickUniqueColor(usedColors);
+      usedColors.push(dayColor);
+      const layer = createLayerWithRoute(route, routeName, dayColor);
+      builtLayers.push(layer);
+    }
+
+    if (!builtLayers.length) {
       throw new Error("可识别地点不足，无法生成路线");
     }
 
-    const preferredMode = "driving";
-    const transitCity = normalizeTransitCity(points[0]?.city || state.draft.transitCity) || "成都";
-    const { segments, segmentModes, degraded } = await planAIRouteSegmentsWithFallback(
-      points,
-      preferredMode,
-      transitCity
-    );
-
-    const layerName = nextLayerName(state.layers);
-    const route = createRouteRecord({
-      points,
-      segmentModes,
-      segments,
-      name: layerName
-    });
-    const layer = createLayerWithRoute(route, layerName);
-
-    state.layers.push(layer);
-    state.selectedLayerId = layer.id;
+    state.layers.push(...builtLayers);
+    state.selectedLayerId = builtLayers[0].id;
     state.editorVisible = true;
     state.newRouteEditorOpen = false;
     state.mobileRightOpen = false;
 
     rebuildLayers();
-    state.mapService.fitLayers([layer]);
+    state.mapService.fitLayers(builtLayers);
     persistLayersState();
     renderLeftPanel();
     renderRightPanel();
@@ -1011,17 +1150,23 @@ async function applyAIRouteToMap(messageId) {
     if (inferredCity) {
       notes.push(`目标城市：${inferredCity}`);
     }
-    if (misses.length) {
-      notes.push(`未命中：${misses.join("、")}`);
+    if (routeDayPlans.length > 1) {
+      notes.push(`按${routeDayPlans.length}天生成${builtLayers.length}个路线卡片`);
     }
-    if (degraded.length) {
-      notes.push(degraded.join("，"));
+    if (missedByDay.length) {
+      notes.push(missedByDay.join("；"));
+    }
+    if (skippedDays.length) {
+      notes.push(`未生成：${skippedDays.join("、")}`);
+    }
+    if (degradedByDay.length) {
+      notes.push(degradedByDay.join("；"));
     }
 
     updateRouteActionMessage(message, "accepted", notes.join("；"));
     saveAIChatMessages(state.aiChatMessages);
     renderAIChatPanel();
-    setToast(`AI路线已添加：${layer.name}`, "success");
+    setToast(`AI路线已添加：${builtLayers.length}条`, "success");
   } catch (error) {
     updateRouteActionMessage(message, "failed", error.message || "未知错误");
     saveAIChatMessages(state.aiChatMessages);
@@ -1795,14 +1940,32 @@ function createRouteRecord({ points, segmentModes, segments, name }) {
   });
 }
 
-function createLayerWithRoute(route, layerName) {
+function createLayerWithRoute(route, layerName, preferredColor = "") {
+  const layer = ensureLayerRoutes({
+    id: createId("layer"),
+    name: layerName,
+    color: preferredColor || pickUniqueColor(state.layers.map((item) => item.color)),
+    visible: true,
+    routes: [route],
+    selectedRouteId: route.id
+  });
+  return layer;
+}
+
+function createLayerWithRoutes(routes = [], layerName) {
+  const validRoutes = routes.filter((route) => route && Array.isArray(route.points) && route.points.length >= 2);
+  if (!validRoutes.length) {
+    return null;
+  }
+
+  const normalizedRoutes = validRoutes.map((route, index) => normalizeRoute(route, index));
   const layer = ensureLayerRoutes({
     id: createId("layer"),
     name: layerName,
     color: pickUniqueColor(state.layers.map((item) => item.color)),
     visible: true,
-    routes: [route],
-    selectedRouteId: route.id
+    routes: normalizedRoutes,
+    selectedRouteId: normalizedRoutes[0]?.id || null
   });
   return layer;
 }
