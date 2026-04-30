@@ -301,12 +301,21 @@ function scoreRoutePOICandidate(poi, targetName, preferredCity = "") {
   }
 
   if (city) {
-    if (poiCity === city) {
+    // 港澳台在地图 API 中可能 city 获取为空，需要退而使用 province 等字段，如果匹配直接加分
+    const poiProvince = normalizeTransitCity(poi?.province || "");
+    const poiDistrict = normalizeTransitCity(poi?.district || "");
+    
+    if (poiCity === city || poiProvince === city || poiDistrict === city || (city.includes("香港") && (poiCity.includes("香港") || poiProvince.includes("香港")))) {
       score += 45;
     } else if (poiCity && (poiCity.includes(city) || city.includes(poiCity))) {
       score += 25;
+    } else if (poiProvince && (poiProvince.includes(city) || city.includes(poiProvince))) {
+      score += 25;
     } else {
-      score -= 15;
+      // 避免因为 AMap 数据不全把正常 POI 扣掉分
+      if (poiCity || poiProvince) {
+         score -= 15;
+      }
     }
   }
 
@@ -328,22 +337,8 @@ function pickBestRoutePOI(pois = [], targetName = "", preferredCity = "") {
     }))
     .sort((a, b) => b.score - a.score);
 
-  const best = scored[0];
-  if (!best) {
-    return null;
-  }
-
-  const city = normalizeTransitCity(preferredCity || "");
-  const bestCity = normalizeTransitCity(best.poi?.city || "");
-  if (city && bestCity && bestCity !== city && best.score < 130) {
-    return null;
-  }
-
-  if (best.score < 45) {
-    return null;
-  }
-
-  return best.poi;
+  // 只要搜索能返回值，不管我们内部给的最佳匹配打分多低，直接选取最接近的第一项
+  return scored[0]?.poi || pois[0] || null;
 }
 
 function extractCityFromText(text = "") {
@@ -1018,7 +1013,7 @@ async function buildRoutePointsFromPlaces(placeNames = [], options = {}) {
     }
 
     const poi = pickBestRoutePOI(pois, name, preferredCity);
-    if (!poi) {
+    if (!poi || !poi.location) {
       misses.push(name);
       continue;
     }
@@ -1379,7 +1374,7 @@ function normalizeTransitCity(city) {
   if (!text) {
     return "";
   }
-  return text.replace(/市$/, "");
+  return text.replace(/(市|特别行政区|自治区|自治州|地区|盟)$/, "");
 }
 
 async function resolveTransitCityFromStart(startPoint, fallbackCity) {
@@ -1510,14 +1505,21 @@ function renderLeftPanel() {
       <h2>VOYAGE</h2>
     </div>
 
-    <section class="panel-block">
+    <section class="panel-block" style="display: flex; flex-direction: column; flex: 1; position: relative;">
       <div class="panel-head-inline">
         <h3>路线管理</h3>
-        <button data-action="open-new-route-editor" class="btn tiny" type="button">+</button>
+        <div style="display: flex; gap: 8px;">
+          <button data-action="share-route" class="btn tiny" type="button" title="分享路线">分享</button>
+          <button data-action="open-new-route-editor" class="btn tiny" type="button">+</button>
+        </div>
       </div>
-      <ul class="layer-list">
+      <ul class="layer-list" style="flex: 1; overflow-y: auto;">
         ${layerRows || '<li class="muted">暂无图层，先生成一条路线。</li>'}
       </ul>
+      <div style="text-align: right; padding-top: 15px;">
+        <button data-action="import-route" class="btn primary tiny" type="button">导入路线</button>
+        <input type="file" id="import-file-input" accept=".json,.gpx" style="display:none;" />
+      </div>
     </section>
   `;
 }
@@ -1655,7 +1657,10 @@ function renderRightPanel() {
   panel.innerHTML = `
     <div class="panel-header">
       <h2>编辑：${layer.name}</h2>
-      <button data-action="focus-selected" class="btn soft" type="button">定位图层</button>
+      <div class="panel-header-actions">
+        <button data-action="focus-selected" class="btn soft" type="button">定位图层</button>
+        <button data-action="close-editor" class="btn soft" type="button">关闭</button>
+      </div>
     </div>
 
     <section class="panel-block">
@@ -1873,6 +1878,10 @@ function clearPickMode() {
 }
 
 function applyPoiToDraft(poi, target) {
+  if (!poi.location) {
+    setToast("该地点无有效坐标数据", "warning");
+    return;
+  }
   const point = createPoint({
     name: poi.name,
     lng: poi.location[0],
@@ -2286,6 +2295,161 @@ function handleLeftPanelAction(event) {
 
   const { action } = target.dataset;
 
+  if (action === "share-route") {
+    // 强制优先在弹窗前校验是否有勾选的路线
+    const exportLayers = state.layers.filter(layer => layer.visible !== false);
+    if (exportLayers.length === 0) {
+      return alert("提示：请在左侧列表中至少勾选一条需要导出的路线。");
+    }
+
+    const dialog = document.createElement("dialog");
+    dialog.style.padding = "20px";
+    dialog.style.borderRadius = "8px";
+    dialog.style.border = "none";
+    dialog.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
+    dialog.style.maxWidth = "450px";
+    dialog.style.width = "90%";
+    dialog.innerHTML = `
+      <h3 style="margin-top: 0">分享路线 <span style="font-size:12px;font-weight:normal;color:#666;">(仅导出已勾选的 ${exportLayers.length} 条图层)</span></h3>
+      <div id="share-cards-container" style="display: flex; gap: 10px; margin-bottom: 20px;">
+        <div class="share-card selected" data-format="json" style="flex:1; padding:15px; border:2px solid cornflowerblue; border-radius:8px; cursor:pointer; text-align:center; font-weight:bold; background:#f0f6ff; transition:all 0.2s;">
+          <div>JSON</div>
+          <div style="font-size:12px; color:#666; font-weight:normal;">数据保留</div>
+        </div>
+        <div class="share-card" data-format="gpx" style="flex:1; padding:15px; border:2px solid #ddd; border-radius:8px; cursor:pointer; text-align:center; transition:all 0.2s;">
+          <div>GPX</div>
+          <div style="font-size:12px; color:#666; font-weight:normal;">(可导入其他地图软件)</div>
+        </div>
+      </div>
+      <div style="text-align: right;">
+        <button id="share-cancel" class="btn soft tiny">取消</button>
+        <button id="share-confirm" class="btn primary tiny">确认导出</button>
+      </div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.showModal();
+
+    let selectedFormat = "json";
+    const cards = dialog.querySelectorAll(".share-card");
+    cards.forEach(card => {
+      card.onclick = () => {
+        cards.forEach(c => {
+          c.style.border = "2px solid #ddd";
+          c.style.background = "transparent";
+          c.style.fontWeight = "normal";
+          c.classList.remove("selected");
+        });
+        card.style.border = "2px solid cornflowerblue";
+        card.style.background = "#f0f6ff";
+        card.style.fontWeight = "bold";
+        card.classList.add("selected");
+        selectedFormat = card.dataset.format;
+      };
+    });
+
+    dialog.querySelector("#share-cancel").onclick = () => {
+      dialog.close();
+      dialog.remove();
+    };
+
+    dialog.querySelector("#share-confirm").onclick = () => {
+      dialog.close();
+      dialog.remove();
+
+      if (selectedFormat === "json") {
+        const fileContent = JSON.stringify(exportLayers, null, 2);
+        const blob = new Blob([fileContent], { type: "application/json" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "voyage_routes_data.json";
+        link.click();
+      } else if (selectedFormat === "gpx") {
+        // 创建 GPX 结构
+        let gpxData = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="Voyage Plan">
+`;
+        exportLayers.forEach((layer) => {
+          if (!layer.routes) return;
+          layer.routes.filter(r => r.visible !== false).forEach((route) => {
+            const nameEscaped = (route.meta?.name || layer.name || "未命名路线").replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            gpxData += `  <trk>\n    <name>${nameEscaped}</name>\n    <trkseg>\n`;
+            
+            // 导出实际轨迹的分段路线坐标（高精度）
+            if (route.segments && route.segments.length) {
+              route.segments.forEach(segment => {
+                if (segment.path && segment.path.length) {
+                  segment.path.forEach(pt => {
+                    const lng = Array.isArray(pt) ? pt[0] : (pt.lng || pt.getLng());
+                    const lat = Array.isArray(pt) ? pt[1] : (pt.lat || pt.getLat());
+                    gpxData += `      <trkpt lat="${lat}" lon="${lng}"></trkpt>\n`;
+                  });
+                }
+              });
+            } else if (route.points && route.points.length) {
+               // 降级使用粗略的核心点替代
+               route.points.forEach(pt => {
+                  const ptName = pt.name ? `<name>${pt.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</name>` : '';
+                  gpxData += `      <trkpt lat="${pt.lat}" lon="${pt.lng}">${ptName}</trkpt>\n`;
+               });
+            }
+            gpxData += `    </trkseg>\n  </trk>\n`;
+          });
+        });
+        gpxData += `</gpx>`;
+        
+        const blob = new Blob([gpxData], { type: "application/gpx+xml" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "voyage_routes_export.gpx";
+        link.click();
+      }
+    };
+    return;
+  }
+
+  if (action === "import-route") {
+    const input = document.getElementById("import-file-input");
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".json") && !name.endsWith(".gpx")) {
+        alert("格式错误：仅支持 .json 或 .gpx 格式文件！");
+        input.value = "";
+        return;
+      }
+      
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text = ev.target.result;
+        try {
+          if (name.endsWith(".json")) {
+            const data = JSON.parse(text);
+            if (Array.isArray(data)) {
+               state.layers.push(...data);
+               rebuildLayers();
+               persistLayersState();
+               renderLeftPanel();
+               if (state.mapService && state.mapService.fitLayers) state.mapService.fitLayers(state.layers);
+               setToast("成功导入路线数据");
+            } else {
+               alert("文件解析错误：导入的 JSON 中未能检测到合法的路线图层数组结构。");
+            }
+          } else if (name.endsWith(".gpx")) {
+             alert("当前环境暂不支持直接解析 GPX 数据渲染，需转换为原生 JSON 格式。");
+          }
+        } catch (err) {
+          alert("文件解析系统崩溃: " + err.message);
+        }
+        input.value = "";
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+    return;
+  }
+
   if (action === "new-draft") {
     state.draft = createEmptyDraft();
     state.searchResults = [];
@@ -2454,7 +2618,7 @@ function handleRightPanelAction(event) {
 
   const { action } = target.dataset;
 
-  if (action === "close-new-route-editor") {
+  if (action === "close-new-route-editor" || action === "close-editor") {
     state.newRouteEditorOpen = false;
     state.editorVisible = false;
     state.mobileRightOpen = false;

@@ -4,14 +4,26 @@ function parseLngLatPoint(point) {
   if (!point) {
     return null;
   }
-  if (Array.isArray(point) && point.length >= 2) {
-    return [Number(point[0]), Number(point[1])];
+  let lng, lat;
+  if (typeof point === "string") {
+    const parts = point.split(",");
+    if (parts.length >= 2) {
+      lng = Number(parts[0]);
+      lat = Number(parts[1]);
+    }
+  } else if (Array.isArray(point) && point.length >= 2) {
+    lng = Number(point[0]);
+    lat = Number(point[1]);
+  } else if (point.lng !== undefined && point.lat !== undefined) {
+    lng = Number(point.lng);
+    lat = Number(point.lat);
+  } else if (typeof point.getLng === "function" && typeof point.getLat === "function") {
+    lng = Number(point.getLng());
+    lat = Number(point.getLat());
   }
-  if (typeof point.lng === "number" && typeof point.lat === "number") {
-    return [point.lng, point.lat];
-  }
-  if (typeof point.getLng === "function" && typeof point.getLat === "function") {
-    return [point.getLng(), point.getLat()];
+  
+  if (lng !== undefined && lat !== undefined && !Number.isNaN(lng) && !Number.isNaN(lat)) {
+    return [lng, lat];
   }
   return null;
 }
@@ -170,7 +182,7 @@ function normalizeCityText(city) {
 }
 
 function normalizeSearchCity(city) {
-  return normalizeCityText(city).replace(/市$/, "");
+  return normalizeCityText(city).replace(/(市|特别行政区|自治区|自治州|地区|盟)$/, "");
 }
 
 function collectTransitTools(plan = {}) {
@@ -313,6 +325,7 @@ export class MapService {
       center: [104.0668, 30.5728],
       mapStyle: this.getMapStyleByTheme(this.themeMode),
       resizeEnable: true,
+      WebGLParams: { preserveDrawingBuffer: true },
       viewMode: "2D"
     });
 
@@ -470,27 +483,28 @@ export class MapService {
     return 0;
   }
 
-  prioritizeSearchResults(pois = [], context = {}) {
+  prioritizeSearchResults(pois = [], context = {}, keyword = "") {
     const city = normalizeSearchCity(context.city);
     const bounds = context.bounds;
     const center = context.center;
+    const kw = (keyword || "").trim();
 
     return [...pois].sort((a, b) => {
+      if (kw) {
+        const aExact = a.name === kw ? 1 : 0;
+        const bExact = b.name === kw ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+      }
+
       const aCityScore = this.getCityMatchScore(a.city, city);
       const bCityScore = this.getCityMatchScore(b.city, city);
       if (aCityScore !== bCityScore) {
         return bCityScore - aCityScore;
       }
 
-      const aInBounds = this.isLocationInBounds(a.location, bounds) ? 1 : 0;
-      const bInBounds = this.isLocationInBounds(b.location, bounds) ? 1 : 0;
-      if (aInBounds !== bInBounds) {
-        return bInBounds - aInBounds;
-      }
-
-      const aDistance = this.getCenterDistance(a.location, center);
-      const bDistance = this.getCenterDistance(b.location, center);
-      return aDistance - bDistance;
+      // 保留高德原始的权重：高德返回的大多数是基于热度和相关性
+      // 不应盲目使用中心距离去完全覆盖热度（否则"时代广场"会被几百米外的"时代广场便利店"挤掉）
+      return 0;
     });
   }
 
@@ -546,7 +560,8 @@ export class MapService {
     if (searchCity && typeof this.placeSearch.setCity === "function") {
       this.placeSearch.setCity(searchCity);
       if (typeof this.placeSearch.setCityLimit === "function") {
-        this.placeSearch.setCityLimit(true);
+        const isSpArea = /香港|澳门|台湾/.test(searchCity);
+        this.placeSearch.setCityLimit(!isSpArea);
       }
 
       let cityPois = [];
@@ -558,7 +573,7 @@ export class MapService {
 
       if (cityPois.length) {
         return {
-          pois: this.prioritizeSearchResults(cityPois, { ...context, city: searchCity }),
+          pois: this.prioritizeSearchResults(cityPois, { ...context, city: searchCity }, keyword),
           fallbackUsed: false,
           searchCity
         };
@@ -581,7 +596,7 @@ export class MapService {
 
       const fallbackPois = await this.runPlaceSearch(keyword);
       return {
-        pois: this.prioritizeSearchResults(fallbackPois, { ...context, city: "" }),
+        pois: this.prioritizeSearchResults(fallbackPois, { ...context, city: "" }, keyword),
         fallbackUsed: true,
         searchCity
       };
@@ -590,9 +605,12 @@ export class MapService {
     if (typeof this.placeSearch.setCityLimit === "function") {
       this.placeSearch.setCityLimit(false);
     }
+    if (typeof this.placeSearch.setCity === "function") {
+      this.placeSearch.setCity("");
+    }
     const pois = await this.runPlaceSearch(keyword);
     return {
-      pois: this.prioritizeSearchResults(pois, context),
+      pois: this.prioritizeSearchResults(pois, context, keyword),
       fallbackUsed: false,
       searchCity: ""
     };
