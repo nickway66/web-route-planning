@@ -1040,6 +1040,24 @@ function patchUnsupportedCanvasColors(root) {
     return;
   }
 
+  const ownerWindow = root.ownerDocument?.defaultView || window;
+  const colorProps = [
+    "color",
+    "background-color",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
+    "outline-color",
+    "text-decoration-color",
+    "column-rule-color",
+    "caret-color",
+    "fill",
+    "stroke",
+    "box-shadow",
+    "text-shadow"
+  ];
+  const hasUnsupportedColor = (value = "") => /(color|color-mix|oklch|lab|lch)\(/i.test(String(value));
   const nodes = [root, ...root.querySelectorAll("*")];
   nodes.forEach((node) => {
     const style = node.getAttribute?.("style");
@@ -1053,6 +1071,37 @@ function patchUnsupportedCanvasColors(root) {
           .replace(/lab\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
           .replace(/lch\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
       );
+    }
+
+    if (!node.style || typeof ownerWindow.getComputedStyle !== "function") {
+      return;
+    }
+
+    const computed = ownerWindow.getComputedStyle(node);
+    colorProps.forEach((prop) => {
+      const value = computed.getPropertyValue(prop);
+      if (!hasUnsupportedColor(value)) {
+        return;
+      }
+
+      if (prop.includes("shadow")) {
+        node.style.setProperty(prop, "none", "important");
+      } else if (prop === "background-color") {
+        node.style.setProperty(prop, "transparent", "important");
+      } else if (prop === "fill" || prop === "stroke") {
+        node.style.setProperty(prop, "currentColor", "important");
+      } else {
+        node.style.setProperty(prop, CANVAS_COLOR_FALLBACK, "important");
+      }
+    });
+
+    const backgroundImage = computed.getPropertyValue("background-image");
+    if (hasUnsupportedColor(backgroundImage)) {
+      node.style.setProperty("background-image", "none", "important");
+    }
+    const filter = computed.getPropertyValue("filter");
+    if (hasUnsupportedColor(filter)) {
+      node.style.setProperty("filter", "none", "important");
     }
   });
 }
