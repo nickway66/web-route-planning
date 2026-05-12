@@ -1,4 +1,6 @@
 const SCRIPT_ID = "amap-jsapi-loader";
+const SCREENSHOT_SCRIPT_ID = "amap-screenshot-loader";
+const SCREENSHOT_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/@amap/screenshot/dist/index.js";
 
 function parseLngLatPoint(point) {
   if (!point) {
@@ -318,7 +320,7 @@ export class MapService {
 
   async init(containerId) {
     await this.ensureScript();
-    await this.ensurePlugins(["AMap.ToolBar", "AMap.Scale", "AMap.PlaceSearch"]);
+    await this.ensurePlugins(["AMap.ToolBar", "AMap.Scale", "AMap.PlaceSearch", "AMap.AutoComplete"]);
 
     this.map = new window.AMap.Map(containerId, {
       zoom: 5,
@@ -326,7 +328,8 @@ export class MapService {
       mapStyle: this.getMapStyleByTheme(this.themeMode),
       resizeEnable: true,
       WebGLParams: { preserveDrawingBuffer: true },
-      viewMode: "2D"
+      viewMode: "3D",
+      pitch: 0
     });
 
     this.toolBarControl = new window.AMap.ToolBar({ position: "RB" });
@@ -348,6 +351,9 @@ export class MapService {
       pageSize: 15,
       pageIndex: 1,
       extensions: "all"
+    });
+    this.autoComplete = new window.AMap.AutoComplete({
+      citylimit: false
     });
 
     this.poiInfoWindow = new window.AMap.InfoWindow({
@@ -420,6 +426,30 @@ export class MapService {
     return this.map.getBounds();
   }
 
+  getViewState() {
+    if (!this.map) {
+      return null;
+    }
+    const center = this.getMapCenterPoint();
+    return {
+      center,
+      zoom: typeof this.map.getZoom === "function" ? this.map.getZoom() : null
+    };
+  }
+
+  restoreViewState(viewState) {
+    if (!this.map || !viewState?.center) {
+      return;
+    }
+    const zoom = Number(viewState.zoom);
+    const center = [viewState.center.lng, viewState.center.lat];
+    if (Number.isFinite(zoom) && typeof this.map.setZoomAndCenter === "function") {
+      this.map.setZoomAndCenter(zoom, center);
+    } else if (typeof this.map.setCenter === "function") {
+      this.map.setCenter(center);
+    }
+  }
+
   async getSearchContext(preferredCity = "") {
     const center = this.getMapCenterPoint();
     const bounds = this.getMapBounds();
@@ -489,23 +519,45 @@ export class MapService {
     const center = context.center;
     const kw = (keyword || "").trim();
 
-    return [...pois].sort((a, b) => {
-      if (kw) {
-        const aExact = a.name === kw ? 1 : 0;
-        const bExact = b.name === kw ? 1 : 0;
-        if (aExact !== bExact) return bExact - aExact;
-      }
-
-      const aCityScore = this.getCityMatchScore(a.city, city);
-      const bCityScore = this.getCityMatchScore(b.city, city);
-      if (aCityScore !== bCityScore) {
-        return bCityScore - aCityScore;
-      }
-
-      // 保留高德原始的权重：高德返回的大多数是基于热度和相关性
-      // 不应盲目使用中心距离去完全覆盖热度（否则"时代广场"会被几百米外的"时代广场便利店"挤掉）
-      return 0;
+    const ranked = [...pois].map((poi, index) => {
+      const distance = this.getCenterDistance(poi.location, center);
+      return {
+        poi,
+        index,
+        exact: kw && poi.name === kw ? 1 : 0,
+        cityScore: this.getCityMatchScore(poi.city, city),
+        inBounds: this.isLocationInBounds(poi.location, bounds),
+        distance
+      };
     });
+    const hasBoundsMatch = ranked.some((item) => item.inBounds);
+    const candidates = hasBoundsMatch ? ranked.filter((item) => item.inBounds) : ranked;
+
+    return candidates
+      .sort((a, b) => {
+        if (a.exact !== b.exact) {
+          return b.exact - a.exact;
+        }
+        if (hasBoundsMatch) {
+          if (a.cityScore !== b.cityScore) {
+            return b.cityScore - a.cityScore;
+          }
+          return a.index - b.index;
+        }
+        if (a.distance !== b.distance) {
+          return a.distance - b.distance;
+        }
+        if (a.cityScore !== b.cityScore) {
+          return b.cityScore - a.cityScore;
+        }
+        return a.index - b.index;
+      })
+      .map((item) => ({
+        ...item.poi,
+        inCurrentView: item.inBounds,
+        distanceFromCenter: Number.isFinite(item.distance) ? item.distance : null,
+        searchScope: hasBoundsMatch ? "viewport" : "nearby"
+      }));
   }
 
   runPlaceSearch(keyword) {
@@ -527,6 +579,9 @@ export class MapService {
           name: poi.name,
           address: poi.address || poi.district || "",
           city: poi.cityname || "",
+          province: poi.pname || poi.province || "",
+          district: poi.adname || poi.district || "",
+          adcode: poi.adcode || "",
           location: parseLngLatPoint(poi.location)
         }));
 
@@ -650,8 +705,126 @@ export class MapService {
       return marker;
     });
 
-    if (this.searchMarkers.length > 0) {
+    if (this.searchMarkers.length > 0 && pois?.fitView === true) {
       this.map.setFitView(this.searchMarkers);
+    }
+  }
+
+  async getSearchSuggestions(keyword, options = {}) {
+    const text = String(keyword || "").trim();
+    if (!text) {
+      return [];
+    }
+
+    if (!this.autoComplete) {
+      await this.ensurePlugins(["AMap.AutoComplete"]);
+      this.autoComplete = new window.AMap.AutoComplete({ citylimit: false });
+    }
+
+    const context = await this.getSearchContext(options?.preferredCity || "");
+    const city = normalizeSearchCity(options?.preferredCity || context.city || "");
+    if (city && typeof this.autoComplete.setCity === "function") {
+      this.autoComplete.setCity(city);
+    }
+
+    return new Promise((resolve) => {
+      this.autoComplete.search(text, (status, result) => {
+        if (status !== "complete") {
+          resolve([]);
+          return;
+        }
+        const tips = (result?.tips || [])
+          .filter((tip) => tip && tip.name && tip.location)
+          .map((tip) => ({
+            id: tip.id || `${tip.name}-${tip.adcode || ""}`,
+            name: tip.name,
+            district: tip.district || "",
+            address: tip.address || tip.district || "",
+            adcode: tip.adcode || "",
+            location: parseLngLatPoint(tip.location)
+          }))
+          .filter((tip) => Array.isArray(tip.location));
+        resolve(this.prioritizeSearchResults(tips, { ...context, city }, text).slice(0, 6));
+      });
+    });
+  }
+
+  ensureScreenshotPlugin() {
+    if (window.AMap?.Screenshot) {
+      return Promise.resolve();
+    }
+
+    const existing = document.getElementById(SCREENSHOT_SCRIPT_ID);
+    if (existing) {
+      return new Promise((resolve, reject) => {
+        existing.addEventListener("load", () => resolve(), { once: true });
+        existing.addEventListener("error", () => reject(new Error("地图截图插件加载失败")), { once: true });
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.id = SCREENSHOT_SCRIPT_ID;
+      script.async = true;
+      script.src = SCREENSHOT_SCRIPT_URL;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("地图截图插件加载失败"));
+      document.head.appendChild(script);
+    });
+  }
+
+  async captureMapDataURL(type = "image/png") {
+    if (!this.map) {
+      throw new Error("地图尚未初始化");
+    }
+
+    let screenshot = null;
+    try {
+      await this.ensureScreenshotPlugin();
+      screenshot = new window.AMap.Screenshot(this.map);
+      const dataUrl = await screenshot.toDataURL(type);
+      if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/") && dataUrl.length > 1024) {
+        return dataUrl;
+      }
+      throw new Error("截图插件返回了无效图片");
+    } catch (error) {
+      const canvas = this.map.getContainer?.().querySelector("canvas");
+      if (!canvas || typeof canvas.toDataURL !== "function") {
+        throw error;
+      }
+      try {
+        const dataUrl = canvas.toDataURL(type);
+        if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/") && dataUrl.length > 1024) {
+          return dataUrl;
+        }
+      } catch (fallbackError) {
+        throw error;
+      }
+      throw error;
+    } finally {
+      if (screenshot && typeof screenshot.destroy === "function") {
+        screenshot.destroy();
+      }
+    }
+  }
+
+  async downloadMapScreenshot(filename = "voyage_routes_map.png", type = "image/png") {
+    if (!this.map) {
+      throw new Error("地图尚未初始化");
+    }
+
+    await this.ensureScreenshotPlugin();
+    const screenshot = new window.AMap.Screenshot(this.map);
+    try {
+      const ok = await screenshot.download({ filename, type });
+      if (ok === false) {
+        throw new Error("地图截图下载失败");
+      }
+      return ok;
+    } finally {
+      if (typeof screenshot.destroy === "function") {
+        screenshot.destroy();
+      }
     }
   }
 

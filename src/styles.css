@@ -235,6 +235,15 @@ body {
   overflow-y: auto;
 }
 
+body.export-capturing .amap-info,
+body.export-capturing .amap-toolbar,
+body.export-capturing .amap-scalecontrol,
+body.export-capturing .amap-controlbar,
+body.export-capturing .amap-logo,
+body.export-capturing .amap-copyright {
+  visibility: hidden !important;
+}
+
 .result-head {
   display: flex;
   justify-content: space-between;

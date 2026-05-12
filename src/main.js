@@ -1,4 +1,6 @@
 import "./styles.css";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
 import { AMAP_KEY, AMAP_SECURITY_CODE, ZHIPU_API_ID, ZHIPU_API_KEY, ZHIPU_MODEL } from "./config";
 import { MapService } from "./mapService";
 import { loadHistoryRoutes, loadLayerState, removeHistoryRoute, saveLayerState, upsertHistoryRoute } from "./storage";
@@ -22,8 +24,9 @@ const TRAVEL_MODES = [
 const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
 const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
 const ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const CANVAS_COLOR_FALLBACK = "rgba(7, 18, 36, 0.92)";
 const AI_SYSTEM_PROMPT =
-  "你是专业旅游路线规划AI，仅执行路线规划，遵守以下铁律：所有地点必须使用高德地图可识别的标准官方全称，禁止简称、俗称、别名；地点名称必须加英文双引号。只对路线地点加双引号，其他说明文字不要加引号而后在每个地点后添加游玩时间，景点简要介绍以及预估消费金额。如果用户要求两日或多日游玩路线，则每日为一条路线。输出顺序示例：\"广州塔\"\n预估游玩三小时\n门票150-220元\n营业时间9:00-22:30\n中国第一高塔，白天可远眺珠江两岸，傍晚可拍美丽落日 \n \"海心沙亚运公园\" \n预估游玩一小时\n免费开放\n营业时间：15:00-22:00\n 由亚运场馆改造的免费公园，可同时拍到落日、花海与广州塔同框。 \n\"广州圣心大教堂\"\n预估游玩一小时\n免费开放\n营业时间：09:00-14:30/15:00-17:00。\n 全球四座全石结构哥特式教堂之一，宛如东方巴黎圣母院。建议在外拍摄建筑全景和细节，夕阳下更显庄严美丽。\n";
+  '你是专业旅游路线规划AI，仅执行路线规划。必须只返回合法 JSON，不要返回 Markdown、代码块或 JSON 以外的文字。所有地点必须使用高德地图可搜索到的标准官方全称，禁止简称、俗称、别名；如果不确定地点能被高德搜索到，就不要放入 places。JSON 结构固定为：{"city":"目标城市","days":[{"day":1,"places":[{"name":"高德官方地点全称","duration":"预估游玩时间","cost":"预估消费金额","hours":"营业时间","description":"景点简要介绍"}]}]}。如果用户要求两日或多日游玩路线，则 days 内每日一条路线。地点顺序就是路线顺序。';
 
 const app = document.getElementById("app");
 
@@ -91,6 +94,107 @@ function escapeHtml(text = "") {
   });
 }
 
+function downloadBlob(blob, filename) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function dataUrlToUint8Array(dataUrl = "") {
+  const base64 = String(dataUrl).split(",")[1] || "";
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function concatUint8Arrays(chunks = []) {
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return result;
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片加载失败"));
+    image.src = src;
+  });
+}
+
+async function convertDataUrlToJpeg(dataUrl) {
+  const image = await loadImageElement(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return {
+    dataUrl: canvas.toDataURL("image/jpeg", 0.92),
+    width: canvas.width,
+    height: canvas.height
+  };
+}
+
+function createImagePdfBlob(jpegDataUrl, width, height) {
+  const encoder = new TextEncoder();
+  const imageBytes = dataUrlToUint8Array(jpegDataUrl);
+  const pageWidth = 842;
+  const pageHeight = 595;
+  const margin = 24;
+  const scale = Math.min((pageWidth - margin * 2) / width, (pageHeight - margin * 2) / height);
+  const drawWidth = Math.round(width * scale * 100) / 100;
+  const drawHeight = Math.round(height * scale * 100) / 100;
+  const x = Math.round(((pageWidth - drawWidth) / 2) * 100) / 100;
+  const y = Math.round(((pageHeight - drawHeight) / 2) * 100) / 100;
+  const content = `q\n${drawWidth} 0 0 ${drawHeight} ${x} ${y} cm\n/Im0 Do\nQ\n`;
+  const objects = [
+    encoder.encode("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"),
+    encoder.encode(`2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`),
+    encoder.encode(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n`),
+    concatUint8Arrays([
+      encoder.encode(`4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imageBytes.length} >>\nstream\n`),
+      imageBytes,
+      encoder.encode("\nendstream\nendobj\n")
+    ]),
+    encoder.encode(`5 0 obj\n<< /Length ${content.length} >>\nstream\n${content}endstream\nendobj\n`)
+  ];
+  const chunks = [encoder.encode("%PDF-1.4\n")];
+  const offsets = [0];
+  let offset = chunks[0].length;
+  objects.forEach((object) => {
+    offsets.push(offset);
+    chunks.push(object);
+    offset += object.length;
+  });
+  const xrefOffset = offset;
+  const xref = [
+    "xref",
+    `0 ${objects.length + 1}`,
+    "0000000000 65535 f ",
+    ...offsets.slice(1).map((item) => `${String(item).padStart(10, "0")} 00000 n `),
+    "trailer",
+    `<< /Size ${objects.length + 1} /Root 1 0 R >>`,
+    "startxref",
+    `${xrefOffset}`,
+    "%%EOF"
+  ].join("\n");
+  chunks.push(encoder.encode(xref));
+  return new Blob([concatUint8Arrays(chunks)], { type: "application/pdf" });
+}
+
 function normalizeAIText(content) {
   if (typeof content === "string") {
     return content.trim();
@@ -115,9 +219,101 @@ function normalizeAIText(content) {
   return "";
 }
 
+function extractJsonObjectText(rawText = "") {
+  const text = String(rawText || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  if (!text) {
+    return "";
+  }
+  if (text.startsWith("{") && text.endsWith("}")) {
+    return text;
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  return start >= 0 && end > start ? text.slice(start, end + 1) : "";
+}
+
+function normalizeAIJsonPlace(place) {
+  if (typeof place === "string") {
+    const name = normalizeAIRoutePlaceName(place);
+    return name ? { name } : null;
+  }
+  if (!place || typeof place !== "object") {
+    return null;
+  }
+  const name = normalizeAIRoutePlaceName(place.name || place.place || place.title || "");
+  if (!name) {
+    return null;
+  }
+  return {
+    name,
+    duration: String(place.duration || place.playTime || "").trim(),
+    cost: String(place.cost || place.price || "").trim(),
+    hours: String(place.hours || place.openingHours || "").trim(),
+    description: String(place.description || place.intro || place.note || "").trim()
+  };
+}
+
+function parseAIJsonPlan(rawText = "") {
+  const jsonText = extractJsonObjectText(rawText);
+  if (!jsonText) {
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(jsonText);
+    const rawDays = Array.isArray(data.days)
+      ? data.days
+      : Array.isArray(data.routes)
+        ? data.routes
+        : Array.isArray(data.places)
+          ? [{ day: 1, places: data.places }]
+          : [];
+    const days = rawDays
+      .map((day, index) => {
+        const rawPlaces = Array.isArray(day?.places) ? day.places : Array.isArray(day) ? day : [];
+        const places = rawPlaces.map(normalizeAIJsonPlace).filter(Boolean);
+        return {
+          day: Number(day?.day || index + 1),
+          places
+        };
+      })
+      .filter((day) => day.places.length >= 2)
+      .slice(0, 10);
+
+    if (!days.length) {
+      return null;
+    }
+
+    return {
+      city: normalizeTransitCity(data.city || data.targetCity || ""),
+      days
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function formatAIJsonVisibleText(plan) {
+  return plan.days
+    .map((day, dayIndex) => {
+      const prefix = plan.days.length > 1 ? `第${day.day || dayIndex + 1}天\n` : "";
+      return `${prefix}${day.places
+        .map((place) => {
+          const lines = [`"${place.name}"`];
+          if (place.duration) lines.push(`预估游玩${place.duration}`);
+          if (place.cost) lines.push(place.cost);
+          if (place.hours) lines.push(`营业时间：${place.hours}`);
+          if (place.description) lines.push(place.description);
+          return lines.join("\n");
+        })
+        .join("\n\n")}`;
+    })
+    .join("\n\n");
+}
+
 function extractQuotedPlaceNames(rawText = "") {
   const text = String(rawText || "");
-  const quotePatterns = [/"([^"\n]{1,80})"/g];
+  const quotePatterns = [/"([^"\n]{1,80})"/g, /“([^”\n]{1,80})”/g, /「([^」\n]{1,80})」/g, /『([^』\n]{1,80})』/g];
   const places = [];
   let lastName = "";
 
@@ -142,7 +338,7 @@ function extractQuotedPlaceNames(rawText = "") {
 
       places.push(normalized);
       lastName = normalized;
-      if (places.length >= 12) {
+      if (places.length >= 60) {
         return places;
       }
     }
@@ -238,6 +434,18 @@ function extractDailyQuotedPlacePlans(rawText = "") {
 
 function parseAIPlannedPlaces(rawText = "") {
   const text = String(rawText || "");
+  const jsonPlan = parseAIJsonPlan(text);
+  if (jsonPlan) {
+    const dayPlans = jsonPlan.days.map((day) => day.places.map((place) => place.name));
+    const places = dayPlans.flat();
+    return {
+      visibleText: formatAIJsonVisibleText(jsonPlan),
+      places,
+      dayPlans,
+      targetCity: jsonPlan.city
+    };
+  }
+
   const dayPlans = extractDailyQuotedPlacePlans(text);
   const places = dayPlans.flat();
   const visibleText = text.trim();
@@ -279,7 +487,47 @@ function normalizePlaceForCompare(name = "") {
     .replace(/[\s·・\-—_（）()【】\[\]{}<>《》'"`~!@#$%^&*,，。；;：:\/\\|?]/g, "");
 }
 
-function scoreRoutePOICandidate(poi, targetName, preferredCity = "") {
+function getPointDistanceKm(from, to) {
+  if (!from || !to) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const fromLng = Number(from.lng ?? from.location?.[0] ?? from[0]);
+  const fromLat = Number(from.lat ?? from.location?.[1] ?? from[1]);
+  const toLng = Number(to.lng ?? to.location?.[0] ?? to[0]);
+  const toLat = Number(to.lat ?? to.location?.[1] ?? to[1]);
+  if (![fromLng, fromLat, toLng, toLat].every(Number.isFinite)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const rad = Math.PI / 180;
+  const dLat = (toLat - fromLat) * rad;
+  const dLng = (toLng - fromLng) * rad;
+  const lat1 = fromLat * rad;
+  const lat2 = toLat * rad;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function isPoiCityCompatible(poi, preferredCity = "") {
+  const city = normalizeTransitCity(preferredCity || "");
+  if (!city) {
+    return true;
+  }
+
+  const fields = [poi?.city, poi?.province, poi?.district, poi?.address]
+    .map((value) => normalizeTransitCity(value || ""))
+    .filter(Boolean);
+  if (!fields.length) {
+    return true;
+  }
+
+  return fields.some((field) => field === city || field.includes(city) || city.includes(field));
+}
+
+function scoreRoutePOICandidate(poi, targetName, preferredCity = "", context = {}) {
   const target = normalizePlaceForCompare(targetName);
   const poiName = normalizePlaceForCompare(poi?.name || "");
   const poiAddress = normalizePlaceForCompare(poi?.address || "");
@@ -319,13 +567,30 @@ function scoreRoutePOICandidate(poi, targetName, preferredCity = "") {
     }
   }
 
+  if (context.anchorPoint && Array.isArray(poi?.location)) {
+    const distanceKm = getPointDistanceKm(context.anchorPoint, poi.location);
+    if (Number.isFinite(distanceKm)) {
+      if (distanceKm <= 3) {
+        score += 45;
+      } else if (distanceKm <= 15) {
+        score += 30;
+      } else if (distanceKm <= 60) {
+        score += 10;
+      } else if (city && !isPoiCityCompatible(poi, city)) {
+        score -= 120;
+      } else if (distanceKm > 200) {
+        score -= 50;
+      }
+    }
+  }
+
   const lengthGap = Math.abs((poiName || "").length - (target || "").length);
   score -= Math.min(20, lengthGap);
 
   return score;
 }
 
-function pickBestRoutePOI(pois = [], targetName = "", preferredCity = "") {
+function pickBestRoutePOI(pois = [], targetName = "", preferredCity = "", context = {}) {
   if (!Array.isArray(pois) || !pois.length) {
     return null;
   }
@@ -333,12 +598,47 @@ function pickBestRoutePOI(pois = [], targetName = "", preferredCity = "") {
   const scored = pois
     .map((poi) => ({
       poi,
-      score: scoreRoutePOICandidate(poi, targetName, preferredCity)
+      score: scoreRoutePOICandidate(poi, targetName, preferredCity, context)
     }))
     .sort((a, b) => b.score - a.score);
 
-  // 只要搜索能返回值，不管我们内部给的最佳匹配打分多低，直接选取最接近的第一项
-  return scored[0]?.poi || pois[0] || null;
+  const best = scored[0];
+  if (!best) {
+    return null;
+  }
+
+  if (preferredCity && context.anchorPoint && Array.isArray(best.poi?.location)) {
+    const distanceKm = getPointDistanceKm(context.anchorPoint, best.poi.location);
+    if (distanceKm > 120 && !isPoiCityCompatible(best.poi, preferredCity)) {
+      return null;
+    }
+  }
+
+  return best.poi;
+}
+
+function optimizeRoutePointOrder(points = []) {
+  if (!Array.isArray(points) || points.length <= 2) {
+    return points;
+  }
+
+  const ordered = [points[0]];
+  const remaining = points.slice(1);
+  while (remaining.length) {
+    const current = ordered[ordered.length - 1];
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    remaining.forEach((point, index) => {
+      const distance = getPointDistanceKm(current, point);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    ordered.push(remaining.splice(bestIndex, 1)[0]);
+  }
+
+  return ordered;
 }
 
 function extractCityFromText(text = "") {
@@ -353,6 +653,9 @@ function extractCityFromText(text = "") {
     "上海",
     "广州",
     "深圳",
+    "香港",
+    "澳门",
+    "台湾",
     "成都",
     "重庆",
     "天津",
@@ -416,7 +719,7 @@ async function inferAIRouteCity(placeNames = [], textContext = "") {
     try {
       const { pois } = await state.mapService.searchPOI(name, { useMapCity: false });
       pois.slice(0, 3).forEach((poi) => {
-        const city = normalizeTransitCity(poi.city || "");
+        const city = normalizeTransitCity(poi.city || poi.province || poi.district || poi.address || "");
         if (!city) {
           return;
         }
@@ -537,6 +840,9 @@ const state = {
   newRouteEditorOpen: false,
   searchResults: [],
   searchResultsOpen: false,
+  searchSuggestions: [],
+  searchSuggestionsOpen: false,
+  searchSuggestTimer: null,
   draft: createEmptyDraft(),
   layers: loadLayerState(),
   selectedLayerId: null,
@@ -666,6 +972,176 @@ function serializeLayersForStorage() {
 
 function persistLayersState() {
   saveLayerState(serializeLayersForStorage());
+}
+
+function getCheckedExportLayers() {
+  return state.layers
+    .filter((layer) => layer.visible !== false)
+    .map((layer) => {
+      const safeLayer = ensureLayerRoutes(layer);
+      const routes = safeLayer.routes.filter((route) => route.visible !== false);
+      if (!routes.length) {
+        return null;
+      }
+      return {
+        ...cloneJSON(safeLayer),
+        routes: cloneJSON(routes),
+        route: cloneJSON(routes[0]),
+        selectedRouteId: routes[0]?.id || null
+      };
+    })
+    .filter(Boolean);
+}
+
+function countExportRoutes(layers = []) {
+  return layers.reduce((sum, layer) => sum + (Array.isArray(layer.routes) ? layer.routes.length : 0), 0);
+}
+
+function createGpxFromLayers(exportLayers = []) {
+  let gpxData = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="Voyage Plan">
+`;
+  exportLayers.forEach((layer) => {
+    if (!layer.routes) return;
+    layer.routes.forEach((route) => {
+      const nameEscaped = (route.meta?.name || layer.name || "未命名路线")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      gpxData += `  <trk>\n    <name>${nameEscaped}</name>\n    <trkseg>\n`;
+
+      if (route.segments && route.segments.length) {
+        route.segments.forEach((segment) => {
+          if (segment.path && segment.path.length) {
+            segment.path.forEach((pt) => {
+              const lng = Array.isArray(pt) ? pt[0] : pt.lng || pt.getLng();
+              const lat = Array.isArray(pt) ? pt[1] : pt.lat || pt.getLat();
+              gpxData += `      <trkpt lat="${lat}" lon="${lng}"></trkpt>\n`;
+            });
+          }
+        });
+      } else if (route.points && route.points.length) {
+        route.points.forEach((pt) => {
+          const ptName = pt.name
+            ? `<name>${pt.name.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</name>`
+            : "";
+          gpxData += `      <trkpt lat="${pt.lat}" lon="${pt.lng}">${ptName}</trkpt>\n`;
+        });
+      }
+      gpxData += `    </trkseg>\n  </trk>\n`;
+    });
+  });
+  gpxData += `</gpx>`;
+  return gpxData;
+}
+
+function patchUnsupportedCanvasColors(root) {
+  if (!root) {
+    return;
+  }
+
+  const nodes = [root, ...root.querySelectorAll("*")];
+  nodes.forEach((node) => {
+    const style = node.getAttribute?.("style");
+    if (style && /(color|color-mix|oklch|lab|lch)\(/i.test(style)) {
+      node.setAttribute(
+        "style",
+        style
+          .replace(/color-mix\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+          .replace(/color\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+          .replace(/oklch\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+          .replace(/lab\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+          .replace(/lch\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+      );
+    }
+  });
+}
+
+async function exportCheckedRoutesAsMap(format, exportLayers = []) {
+  if (!isMapReady()) {
+    throw new Error("地图尚未加载完成");
+  }
+
+  const oldSearchResultsOpen = state.searchResultsOpen;
+  const oldBodyExporting = document.body.classList.contains("export-capturing");
+  const oldViewState = state.mapService.getViewState?.();
+  state.searchResultsOpen = false;
+  renderSearchResults();
+  state.mapService.clearSearchMarkers();
+  rebuildLayers();
+
+  try {
+    document.body.classList.add("export-capturing");
+    state.mapService.fitLayers(exportLayers);
+    await new Promise((resolve) => window.setTimeout(resolve, 650));
+    await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+    const target = document.getElementById("map");
+    if (!target) {
+      throw new Error("未找到地图容器，无法导出");
+    }
+    const canvas = await Promise.race([
+      html2canvas(target, {
+        backgroundColor: null,
+        useCORS: true,
+        allowTaint: false,
+        logging: false,
+        scale: Math.min(2, window.devicePixelRatio || 1),
+        onclone: (documentClone) => {
+          documentClone.querySelectorAll("style").forEach((styleNode) => {
+            styleNode.textContent = String(styleNode.textContent || "")
+              .replace(/color-mix\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+              .replace(/color\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+              .replace(/oklch\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+              .replace(/lab\([^)]+\)/gi, CANVAS_COLOR_FALLBACK)
+              .replace(/lch\([^)]+\)/gi, CANVAS_COLOR_FALLBACK);
+          });
+          patchUnsupportedCanvasColors(documentClone.getElementById("map"));
+        }
+      }),
+      new Promise((_, reject) => window.setTimeout(() => reject(new Error("地图截图生成超时")), 12000))
+    ]);
+    if (!canvas.width || !canvas.height) {
+      throw new Error("地图截图为空");
+    }
+
+    if (format === "png") {
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((value) => {
+          if (value) {
+            resolve(value);
+          } else {
+            reject(new Error("地图截图生成失败"));
+          }
+        }, "image/png");
+      });
+      downloadBlob(blob, "voyage_routes_map.png");
+      return;
+    }
+
+    const imageData = canvas.toDataURL("image/jpeg", 0.92);
+    const orientation = canvas.width >= canvas.height ? "landscape" : "portrait";
+    const pdf = new jsPDF({ orientation, unit: "pt", format: "a4" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 24;
+    const scale = Math.min((pageWidth - margin * 2) / canvas.width, (pageHeight - margin * 2) / canvas.height);
+    const width = canvas.width * scale;
+    const height = canvas.height * scale;
+    pdf.addImage(imageData, "JPEG", (pageWidth - width) / 2, (pageHeight - height) / 2, width, height);
+    pdf.save("voyage_routes_map.pdf");
+  } finally {
+    if (!oldBodyExporting) {
+      document.body.classList.remove("export-capturing");
+    }
+    state.mapService.restoreViewState?.(oldViewState);
+    state.searchResultsOpen = oldSearchResultsOpen;
+    renderSearchResults();
+    if (oldSearchResultsOpen && state.searchResults.length) {
+      state.mapService.renderSearchMarkers(state.searchResults, (poi) => {
+        setToast(`已选中：${poi.name}`);
+      });
+    }
+  }
 }
 
 function getThemeToggleIcon(mode) {
@@ -801,6 +1277,7 @@ async function submitAIChat() {
       pushAIChatMessage("assistant", assistantContent, {
         routePlaces: parsed.places,
         routeDayPlans: parsed.dayPlans,
+        routeTargetCity: parsed.targetCity || "",
         routeActionStatus: "pending"
       });
     } else {
@@ -1012,7 +1489,8 @@ async function buildRoutePointsFromPlaces(placeNames = [], options = {}) {
       continue;
     }
 
-    const poi = pickBestRoutePOI(pois, name, preferredCity);
+    const anchorPoint = points[points.length - 1] || null;
+    const poi = pickBestRoutePOI(pois, name, preferredCity, { anchorPoint });
     if (!poi || !poi.location) {
       misses.push(name);
       continue;
@@ -1023,7 +1501,7 @@ async function buildRoutePointsFromPlaces(placeNames = [], options = {}) {
         lng: poi.location[0],
         lat: poi.location[1],
         address: poi.address,
-        city: poi.city
+        city: poi.city || poi.province || poi.district || preferredCity
       })
     );
   }
@@ -1075,9 +1553,9 @@ async function applyAIRouteToMap(messageId) {
 
     const inferContext = [latestUserPrompt, message.content].filter(Boolean).join("\n");
     const inferPlaces = routeDayPlans.flat();
-    const inferredCity = await inferAIRouteCity(inferPlaces, inferContext);
+    const inferredCity = normalizeTransitCity(message.routeTargetCity || "") || await inferAIRouteCity(inferPlaces, inferContext);
 
-    const layerName = nextLayerName(state.layers);
+    const routeBaseName = inferredCity || nextLayerName(state.layers);
     const builtLayers = [];
     const missedByDay = [];
     const degradedByDay = [];
@@ -1099,10 +1577,11 @@ async function applyAIRouteToMap(messageId) {
         continue;
       }
 
+      const orderedPoints = optimizeRoutePointOrder(points);
       const preferredMode = "driving";
-      const transitCity = normalizeTransitCity(points[0]?.city || state.draft.transitCity) || "成都";
+      const transitCity = normalizeTransitCity(orderedPoints[0]?.city || inferredCity || state.draft.transitCity) || "成都";
       const { segments, segmentModes, degraded } = await planAIRouteSegmentsWithFallback(
-        points,
+        orderedPoints,
         preferredMode,
         transitCity
       );
@@ -1111,9 +1590,9 @@ async function applyAIRouteToMap(messageId) {
         degradedByDay.push(`第${dayIndex + 1}天：${degraded.join("，")}`);
       }
 
-      const routeName = routeDayPlans.length > 1 ? `${layerName}-第${dayIndex + 1}天` : layerName;
+      const routeName = routeDayPlans.length > 1 ? `${routeBaseName}-第${dayIndex + 1}天` : routeBaseName;
       const route = createRouteRecord({
-        points,
+        points: orderedPoints,
         segmentModes,
         segments,
         name: routeName
@@ -1418,6 +1897,31 @@ function formatPlaceCount(count = 0) {
 function renderSearchResults() {
   const container = document.getElementById("search-results");
   if (!container) {
+    return;
+  }
+
+  if (state.searchSuggestionsOpen && state.searchSuggestions.length) {
+    container.innerHTML = `
+      <div class="result-head">
+        <span>搜索推荐 ${state.searchSuggestions.length} 条</span>
+        <button data-action="suggest-close" class="btn tiny ghost" type="button">关闭</button>
+      </div>
+      <ul class="result-list suggestion-list">
+        ${state.searchSuggestions
+          .map(
+            (poi, index) => `
+              <li class="result-item" data-action="suggest-pick" data-index="${index}">
+                <div class="result-title-row">
+                  <strong>${escapeHtml(poi.name)}</strong>
+                  <span>${escapeHtml(poi.district || poi.city || "")}</span>
+                </div>
+                <p>${escapeHtml(poi.address || "无详细地址")}</p>
+              </li>
+            `
+          )
+          .join("")}
+      </ul>
+    `;
     return;
   }
 
@@ -2297,8 +2801,9 @@ function handleLeftPanelAction(event) {
 
   if (action === "share-route") {
     // 强制优先在弹窗前校验是否有勾选的路线
-    const exportLayers = state.layers.filter(layer => layer.visible !== false);
-    if (exportLayers.length === 0) {
+    const exportLayers = getCheckedExportLayers();
+    const exportRouteCount = countExportRoutes(exportLayers);
+    if (exportRouteCount === 0) {
       return alert("提示：请在左侧列表中至少勾选一条需要导出的路线。");
     }
 
@@ -2310,8 +2815,8 @@ function handleLeftPanelAction(event) {
     dialog.style.maxWidth = "450px";
     dialog.style.width = "90%";
     dialog.innerHTML = `
-      <h3 style="margin-top: 0">分享路线 <span style="font-size:12px;font-weight:normal;color:#666;">(仅导出已勾选的 ${exportLayers.length} 条图层)</span></h3>
-      <div id="share-cards-container" style="display: flex; gap: 10px; margin-bottom: 20px;">
+      <h3 style="margin-top: 0">分享路线 <span style="font-size:12px;font-weight:normal;color:#666;">(仅导出已勾选的 ${exportRouteCount} 条路线)</span></h3>
+      <div id="share-cards-container" style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 20px;">
         <div class="share-card selected" data-format="json" style="flex:1; padding:15px; border:2px solid cornflowerblue; border-radius:8px; cursor:pointer; text-align:center; font-weight:bold; background:#f0f6ff; transition:all 0.2s;">
           <div>JSON</div>
           <div style="font-size:12px; color:#666; font-weight:normal;">数据保留</div>
@@ -2319,6 +2824,14 @@ function handleLeftPanelAction(event) {
         <div class="share-card" data-format="gpx" style="flex:1; padding:15px; border:2px solid #ddd; border-radius:8px; cursor:pointer; text-align:center; transition:all 0.2s;">
           <div>GPX</div>
           <div style="font-size:12px; color:#666; font-weight:normal;">(可导入其他地图软件)</div>
+        </div>
+        <div class="share-card" data-format="png" style="flex:1; padding:15px; border:2px solid #ddd; border-radius:8px; cursor:pointer; text-align:center; transition:all 0.2s;">
+          <div>PNG</div>
+          <div style="font-size:12px; color:#666; font-weight:normal;">地图截图</div>
+        </div>
+        <div class="share-card" data-format="pdf" style="flex:1; padding:15px; border:2px solid #ddd; border-radius:8px; cursor:pointer; text-align:center; transition:all 0.2s;">
+          <div>PDF</div>
+          <div style="font-size:12px; color:#666; font-weight:normal;">地图截图</div>
         </div>
       </div>
       <div style="text-align: right;">
@@ -2352,9 +2865,26 @@ function handleLeftPanelAction(event) {
       dialog.remove();
     };
 
-    dialog.querySelector("#share-confirm").onclick = () => {
+    dialog.querySelector("#share-confirm").onclick = async () => {
       dialog.close();
       dialog.remove();
+
+      try {
+        if (selectedFormat === "json") {
+          downloadBlob(new Blob([JSON.stringify(exportLayers, null, 2)], { type: "application/json" }), "voyage_routes_data.json");
+        } else if (selectedFormat === "gpx") {
+          downloadBlob(new Blob([createGpxFromLayers(exportLayers)], { type: "application/gpx+xml" }), "voyage_routes_export.gpx");
+        } else if (selectedFormat === "png" || selectedFormat === "pdf") {
+          setToast("正在导出地图截图...", "info");
+          await exportCheckedRoutesAsMap(selectedFormat, exportLayers);
+        }
+      } catch (error) {
+        console.error(error);
+        const message = error.message || "路线导出失败";
+        setToast(message, "danger");
+        window.alert(`导出失败：${message}`);
+      }
+      return;
 
       if (selectedFormat === "json") {
         const fileContent = JSON.stringify(exportLayers, null, 2);
@@ -2927,6 +3457,8 @@ async function doSearch() {
 
   try {
     state.searchResultsOpen = true;
+    state.searchSuggestionsOpen = false;
+    state.searchSuggestions = [];
     const { pois, fallbackUsed, searchCity } = await state.mapService.searchPOI(keyword);
     state.searchResults = pois.slice(0, 8);
     renderSearchResults();
@@ -2936,9 +3468,20 @@ async function doSearch() {
 
     const usedFallback = Boolean(fallbackUsed && searchCity);
     const fallbackHint = usedFallback ? `当前城市“${searchCity}”未命中，已扩展到全国搜索` : "";
+    const resultScope = state.searchResults[0]?.searchScope || "";
 
     if (!state.searchResults.length) {
       setToast(fallbackHint ? `${fallbackHint}，仍未检索到结果` : "未检索到结果", "warning");
+      return;
+    }
+
+    if (resultScope === "viewport") {
+      setToast(`${fallbackHint ? `${fallbackHint}；` : ""}已优先展示当前视窗内结果`, "info");
+      return;
+    }
+
+    if (resultScope === "nearby") {
+      setToast(`${fallbackHint ? `${fallbackHint}；` : ""}当前视窗无结果，已按距离由近到远展示`, "info");
       return;
     }
 
@@ -2956,6 +3499,38 @@ async function doSearch() {
   }
 }
 
+function scheduleSearchSuggestions() {
+  const input = document.getElementById("search-input");
+  const keyword = input?.value?.trim() || "";
+  if (state.searchSuggestTimer) {
+    window.clearTimeout(state.searchSuggestTimer);
+  }
+
+  if (!keyword || keyword.length < 2 || !isMapReady()) {
+    state.searchSuggestions = [];
+    state.searchSuggestionsOpen = false;
+    renderSearchResults();
+    return;
+  }
+
+  state.searchSuggestTimer = window.setTimeout(async () => {
+    try {
+      const suggestions = await state.mapService.getSearchSuggestions(keyword);
+      if ((document.getElementById("search-input")?.value?.trim() || "") !== keyword) {
+        return;
+      }
+      state.searchSuggestions = suggestions;
+      state.searchSuggestionsOpen = suggestions.length > 0;
+      state.searchResultsOpen = false;
+      renderSearchResults();
+    } catch (error) {
+      state.searchSuggestions = [];
+      state.searchSuggestionsOpen = false;
+      renderSearchResults();
+    }
+  }, 260);
+}
+
 function handleSearchResultAction(event) {
   const target = event.target.closest("[data-action]");
   if (!target) {
@@ -2965,6 +3540,26 @@ function handleSearchResultAction(event) {
   if (target.dataset.action === "search-close") {
     state.searchResultsOpen = false;
     renderSearchResults();
+    return;
+  }
+
+  if (target.dataset.action === "suggest-close") {
+    state.searchSuggestionsOpen = false;
+    renderSearchResults();
+    return;
+  }
+
+  if (target.dataset.action === "suggest-pick") {
+    const index = Number(target.dataset.index);
+    const poi = state.searchSuggestions[index];
+    const input = document.getElementById("search-input");
+    if (poi && input) {
+      input.value = poi.name;
+      state.searchSuggestionsOpen = false;
+      state.searchSuggestions = [];
+      renderSearchResults();
+      doSearch();
+    }
     return;
   }
 
@@ -3043,9 +3638,23 @@ function bindEvents() {
 
     if (event.key === "Escape") {
       state.searchResultsOpen = false;
+      state.searchSuggestionsOpen = false;
       renderSearchResults();
     }
   });
+  searchInput.addEventListener("input", () => {
+    if (!searchInput.value.trim()) {
+      state.searchResults = [];
+      state.searchResultsOpen = false;
+      state.searchSuggestions = [];
+      state.searchSuggestionsOpen = false;
+      state.mapService.clearSearchMarkers();
+      renderSearchResults();
+      return;
+    }
+    scheduleSearchSuggestions();
+  });
+  searchInput.addEventListener("focus", scheduleSearchSuggestions);
   searchResults.addEventListener("click", handleSearchResultAction);
 
   document.addEventListener("click", (event) => {
@@ -3053,8 +3662,9 @@ function bindEvents() {
     if (!searchCard) {
       return;
     }
-    if (state.searchResultsOpen && !searchCard.contains(event.target)) {
+    if ((state.searchResultsOpen || state.searchSuggestionsOpen) && !searchCard.contains(event.target)) {
       state.searchResultsOpen = false;
+      state.searchSuggestionsOpen = false;
       renderSearchResults();
     }
   });
