@@ -1,7 +1,20 @@
 import "./styles.css";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
-import { AMAP_KEY, AMAP_SECURITY_CODE, ZHIPU_API_ID, ZHIPU_API_KEY, ZHIPU_MODEL } from "./config";
+import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
+import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI } from "./apiClient";
+import {
+  clearAIConversations,
+  createAIConversation,
+  deleteAIConversation,
+  exportAIConversations,
+  getAIConversation,
+  importAIConversations,
+  initAIChatStore,
+  listAIConversations,
+  renameAIConversation,
+  saveAIConversationMessages
+} from "./aiChatStore";
 import { MapService } from "./mapService";
 import { loadHistoryRoutes, loadLayerState, removeHistoryRoute, saveLayerState, upsertHistoryRoute } from "./storage";
 import {
@@ -77,6 +90,9 @@ function saveAIChatMessages(messages = []) {
     localStorage.setItem(AI_CHAT_STORAGE_KEY, JSON.stringify(messages));
   } catch (error) {
     console.warn("保存AI聊天记录失败", error);
+  }
+  if (state?.aiConversationId) {
+    persistCurrentAIConversation();
   }
 }
 
@@ -472,6 +488,18 @@ function getAIRouteActionLabel(status = "pending") {
   return "是否将路线添加至地图？";
 }
 
+function stripAIRouteActionTail(content = "") {
+  const labels = [
+    getAIRouteActionLabel("accepted"),
+    getAIRouteActionLabel("rejected"),
+    getAIRouteActionLabel("failed"),
+    getAIRouteActionLabel("processing"),
+    getAIRouteActionLabel("pending")
+  ];
+  const pattern = new RegExp(`\\n\\n(?:${labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?:[（(][\\s\\S]*[）)])?\\s*$`);
+  return String(content || "").replace(pattern, "").trim();
+}
+
 function normalizeAIRoutePlaceName(name = "") {
   return String(name || "")
     .trim()
@@ -849,9 +877,19 @@ const state = {
   historyRoutes: loadHistoryRoutes(),
   historyDetailId: null,
   historyOpen: false,
+  editHistory: {
+    layerId: null,
+    undo: [],
+    redo: []
+  },
   aiChatOpen: false,
   aiChatPending: false,
-  aiChatMessages: loadAIChatMessages(),
+  aiChatMessages: [],
+  aiConversations: [],
+  aiConversationId: "",
+  aiHistoryOpen: false,
+  aiRenamingConversationId: "",
+  aiRouteNotice: null,
   pickMode: null,
   toastTimer: null,
   mobileLeftOpen: false,
@@ -872,7 +910,7 @@ function createEmptyDraft() {
 function createPoint({ name, lng, lat, address = "", city = "" }) {
   return {
     id: createId("pt"),
-    name,
+    name: normalizePointDisplayName(name),
     address,
     city,
     lng: Number(lng),
@@ -881,13 +919,21 @@ function createPoint({ name, lng, lat, address = "", city = "" }) {
   };
 }
 
+function normalizePointDisplayName(name = "") {
+  const text = String(name || "").trim();
+  return text.replace(/地图点\s*[\(（]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*[\)）]/g, "地图点");
+}
+
 function normalizeRoute(route, index = 0) {
   const meta = route?.meta || {};
   return {
     id: route?.id || createId("route"),
     visible: route?.visible !== false,
     historyId: route?.historyId || null,
-    points: cloneJSON(route?.points || []),
+    points: cloneJSON(route?.points || []).map((point) => ({
+      ...point,
+      name: normalizePointDisplayName(point?.name)
+    })),
     segmentModes: cloneJSON(route?.segmentModes || []),
     segments: cloneJSON(route?.segments || []),
     stats: cloneJSON(route?.stats || { distance: 0, duration: 0 }),
@@ -972,6 +1018,108 @@ function serializeLayersForStorage() {
 
 function persistLayersState() {
   saveLayerState(serializeLayersForStorage());
+}
+
+function getLayerSnapshot(layer) {
+  if (!layer) {
+    return null;
+  }
+  ensureLayerRoutes(layer);
+  return cloneJSON({
+    id: layer.id,
+    name: layer.name,
+    routes: layer.routes,
+    selectedRouteId: layer.selectedRouteId
+  });
+}
+
+function applyLayerSnapshot(snapshot) {
+  if (!snapshot) {
+    return null;
+  }
+  const layer = state.layers.find((item) => item.id === snapshot.id);
+  if (!layer) {
+    return null;
+  }
+  layer.name = snapshot.name;
+  layer.routes = cloneJSON(snapshot.routes || []);
+  layer.selectedRouteId = snapshot.selectedRouteId || layer.routes[0]?.id || null;
+  ensureLayerRoutes(layer);
+  return layer;
+}
+
+function ensureEditHistory(layerId) {
+  if (state.editHistory.layerId !== layerId) {
+    state.editHistory = {
+      layerId,
+      undo: [],
+      redo: []
+    };
+  }
+}
+
+function pushEditHistory(layer) {
+  if (!layer) {
+    return;
+  }
+  ensureEditHistory(layer.id);
+  const snapshot = getLayerSnapshot(layer);
+  if (!snapshot) {
+    return;
+  }
+  state.editHistory.undo.push(snapshot);
+  if (state.editHistory.undo.length > 40) {
+    state.editHistory.undo.shift();
+  }
+  state.editHistory.redo = [];
+}
+
+function undoLayerEdit() {
+  const layer = getSelectedLayer();
+  if (!layer) {
+    return;
+  }
+  ensureEditHistory(layer.id);
+  const snapshot = state.editHistory.undo.pop();
+  if (!snapshot) {
+    setToast("没有可后退的操作", "info");
+    return;
+  }
+  const current = getLayerSnapshot(layer);
+  if (current) {
+    state.editHistory.redo.push(current);
+  }
+  const restored = applyLayerSnapshot(snapshot);
+  if (restored) {
+    rebuildLayers();
+    persistLayersState();
+    renderLeftPanel();
+    renderRightPanel();
+  }
+}
+
+function redoLayerEdit() {
+  const layer = getSelectedLayer();
+  if (!layer) {
+    return;
+  }
+  ensureEditHistory(layer.id);
+  const snapshot = state.editHistory.redo.pop();
+  if (!snapshot) {
+    setToast("没有可前进的操作", "info");
+    return;
+  }
+  const current = getLayerSnapshot(layer);
+  if (current) {
+    state.editHistory.undo.push(current);
+  }
+  const restored = applyLayerSnapshot(snapshot);
+  if (restored) {
+    rebuildLayers();
+    persistLayersState();
+    renderLeftPanel();
+    renderRightPanel();
+  }
 }
 
 function getCheckedExportLayers() {
@@ -1242,6 +1390,77 @@ function setToast(message, type = "info") {
   }, 2600);
 }
 
+function setAIRouteNotice(message = "") {
+  state.aiRouteNotice = {
+    type: "danger",
+    title: "路线添加失败",
+    message: String(message || "请检查后端路线规划服务后重试。")
+  };
+  renderAIRouteNotice();
+}
+
+function clearAIRouteNotice() {
+  state.aiRouteNotice = null;
+  renderAIRouteNotice();
+}
+
+function renderAIRouteNotice() {
+  const notice = document.getElementById("ai-route-notice");
+  if (!notice) {
+    return;
+  }
+  if (!state.aiRouteNotice) {
+    notice.classList.add("hidden");
+    notice.innerHTML = "";
+    return;
+  }
+  notice.classList.remove("hidden");
+  notice.dataset.type = state.aiRouteNotice.type || "info";
+  notice.innerHTML = `
+    <div>
+      <strong>${escapeHtml(state.aiRouteNotice.title || "路线状态")}</strong>
+      <p>${escapeHtml(state.aiRouteNotice.message || "")}</p>
+    </div>
+    <button data-action="close-ai-route-notice" class="icon-btn" type="button" aria-label="关闭">×</button>
+  `;
+}
+
+function showFloatingTooltip(target, text = "") {
+  const tooltip = document.getElementById("floating-tooltip");
+  if (!tooltip || !target || !text) {
+    return;
+  }
+
+  const rect = target.getBoundingClientRect();
+  tooltip.textContent = text;
+  tooltip.classList.remove("hidden");
+  tooltip.style.left = "0px";
+  tooltip.style.top = "0px";
+
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const gap = 10;
+  let left = rect.left - tooltipRect.width - gap;
+  let top = rect.top + rect.height / 2 - tooltipRect.height / 2;
+
+  if (left < gap) {
+    left = rect.right + gap;
+  }
+  left = Math.min(Math.max(gap, left), window.innerWidth - tooltipRect.width - gap);
+  top = Math.min(Math.max(gap, top), window.innerHeight - tooltipRect.height - gap);
+
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function hideFloatingTooltip() {
+  const tooltip = document.getElementById("floating-tooltip");
+  if (!tooltip) {
+    return;
+  }
+  tooltip.classList.add("hidden");
+  tooltip.textContent = "";
+}
+
 function pushAIChatMessage(role, content, extras = {}) {
   const text = String(content || "").trim();
   if (!text) {
@@ -1258,6 +1477,27 @@ function pushAIChatMessage(role, content, extras = {}) {
     state.aiChatMessages = state.aiChatMessages.slice(-80);
   }
   saveAIChatMessages(state.aiChatMessages);
+}
+
+function refreshAIConversations() {
+  return listAIConversations()
+    .then((conversations) => {
+      state.aiConversations = conversations;
+    })
+    .catch((error) => {
+      console.warn("刷新 AI 会话列表失败", error);
+    });
+}
+
+function persistCurrentAIConversation() {
+  return saveAIConversationMessages(state.aiConversationId, state.aiChatMessages)
+    .then((conversation) => {
+      state.aiConversationId = conversation.id;
+      return refreshAIConversations();
+    })
+    .catch((error) => {
+      console.warn("保存 AI 会话失败", error);
+    });
 }
 
 function getEditorOverlayOpenState() {
@@ -1319,18 +1559,23 @@ async function submitAIChat() {
   renderAIChatPanel();
 
   try {
-    const answer = await requestZhipuReply(state.aiChatMessages);
-    const parsed = parseAIPlannedPlaces(answer);
-    if (parsed.places.length >= 2) {
-      const assistantContent = `${parsed.visibleText}\n\n${getAIRouteActionLabel("pending")}`;
+    const response = await chatWithAI(state.aiChatMessages);
+    const answer = response.reply || "";
+    const plan = response.parsedPlan || null;
+    const dayPlans = Array.isArray(plan?.days)
+      ? plan.days.map((day) => (Array.isArray(day?.places) ? day.places.map((place) => place.name).filter(Boolean) : []))
+      : [];
+    const places = dayPlans.flat();
+    if (places.length >= 2) {
+      const assistantContent = answer;
       pushAIChatMessage("assistant", assistantContent, {
-        routePlaces: parsed.places,
-        routeDayPlans: parsed.dayPlans,
-        routeTargetCity: parsed.targetCity || "",
+        routePlaces: places,
+        routeDayPlans: dayPlans,
+        routeTargetCity: plan?.city || "",
         routeActionStatus: "pending"
       });
     } else {
-      pushAIChatMessage("assistant", parsed.visibleText || answer);
+      pushAIChatMessage("assistant", answer);
     }
   } catch (error) {
     pushAIChatMessage("assistant", `请求失败：${error.message || "未知错误"}`);
@@ -1362,11 +1607,13 @@ function closeAIChatForRouteEdit() {
   renderAIChatPanel();
 }
 
-function handleAIChatAction(event) {
+async function handleAIChatAction(event) {
   const target = event.target.closest("[data-ai-action]");
   if (!target) {
     return;
   }
+  event.preventDefault();
+  event.stopPropagation();
 
   const action = target.dataset.aiAction;
   if (action === "toggle") {
@@ -1392,6 +1639,147 @@ function handleAIChatAction(event) {
     return;
   }
 
+  if (action === "toggle-history") {
+    state.aiHistoryOpen = !state.aiHistoryOpen;
+    await refreshAIConversations();
+    renderAIChatPanel();
+    return;
+  }
+
+  if (action === "new-conversation") {
+    const conversation = await createAIConversation();
+    state.aiConversationId = conversation.id;
+    state.aiChatMessages = [];
+    state.aiHistoryOpen = true;
+    await refreshAIConversations();
+    renderAIChatPanel();
+    setToast("已新建 AI 对话", "success");
+    return;
+  }
+
+  if (action === "select-conversation") {
+    const conversation = await getAIConversation(target.dataset.conversationId);
+    if (!conversation) {
+      setToast("未找到该对话", "warning");
+      return;
+    }
+    state.aiConversationId = conversation.id;
+    state.aiChatMessages = conversation.messages || [];
+    state.aiHistoryOpen = false;
+    renderAIChatPanel();
+    return;
+  }
+
+  if (action === "rename-conversation") {
+    const conversation = await getAIConversation(target.dataset.conversationId);
+    if (!conversation) {
+      return;
+    }
+    if (state.aiRenamingConversationId && state.aiRenamingConversationId !== conversation.id) {
+      const input = document.querySelector(`[data-ai-rename-input="${state.aiRenamingConversationId}"]`);
+      const previousTitle = input?.value?.trim();
+      if (previousTitle) {
+        await renameAIConversation(state.aiRenamingConversationId, previousTitle);
+        state.aiConversations = state.aiConversations.map((item) =>
+          item.id === state.aiRenamingConversationId ? { ...item, title: previousTitle } : item
+        );
+      }
+    }
+    state.aiRenamingConversationId = conversation.id;
+    renderAIChatPanel();
+    window.setTimeout(() => {
+      const input = document.querySelector(`[data-ai-rename-input="${conversation.id}"]`);
+      input?.focus();
+      input?.select();
+    }, 0);
+    return;
+  }
+
+  if (action === "cancel-rename-conversation") {
+    state.aiRenamingConversationId = "";
+    renderAIChatPanel();
+    return;
+  }
+
+  if (action === "save-rename-conversation") {
+    const conversationId = target.dataset.conversationId;
+    const input = document.querySelector(`[data-ai-rename-input="${conversationId}"]`);
+    const nextTitle = input?.value?.trim();
+    if (nextTitle) {
+      await renameAIConversation(conversationId, nextTitle);
+      state.aiConversations = state.aiConversations.map((conversation) =>
+        conversation.id === conversationId ? { ...conversation, title: nextTitle } : conversation
+      );
+    }
+    state.aiRenamingConversationId = "";
+    renderAIChatPanel();
+    return;
+  }
+
+  if (action === "delete-conversation") {
+    const conversation = await getAIConversation(target.dataset.conversationId);
+    if (!conversation) {
+      return;
+    }
+    const ok = window.confirm(`确认删除 AI 对话“${conversation.title}”吗？`);
+    if (!ok) {
+      return;
+    }
+    const next = await deleteAIConversation(conversation.id);
+    state.aiConversationId = next.id;
+    state.aiChatMessages = next.messages || [];
+    await refreshAIConversations();
+    renderAIChatPanel();
+    return;
+  }
+
+  if (action === "export-conversations") {
+    const payload = await exportAIConversations();
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), "webmap_ai_conversations.json");
+    return;
+  }
+
+  if (action === "import-conversations") {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) {
+        return;
+      }
+      try {
+        const text = await file.text();
+        const imported = await importAIConversations(JSON.parse(text), "append");
+        if (imported) {
+          state.aiConversationId = imported.id;
+          state.aiChatMessages = imported.messages || [];
+        }
+        await refreshAIConversations();
+        renderAIChatPanel();
+        setToast("AI 对话已导入", "success");
+      } catch (error) {
+        setToast(error.message || "AI 对话导入失败", "danger");
+      }
+    };
+    input.click();
+    return;
+  }
+
+  if (action === "clear-all-conversations") {
+    const ok = window.confirm("确认清空全部 AI 对话历史吗？此操作不可恢复。");
+    if (!ok) {
+      return;
+    }
+    const conversation = await clearAIConversations();
+    state.aiConversationId = conversation.id;
+    state.aiChatMessages = conversation.messages || [];
+    await refreshAIConversations();
+    renderAIChatPanel();
+    setToast("全部 AI 对话已清空", "success");
+    return;
+  }
+
   if (action === "send") {
     submitAIChat();
     return;
@@ -1406,11 +1794,13 @@ function handleAIChatAction(event) {
   if (action === "apply-route-no") {
     const messageId = target.dataset.messageId;
     const message = state.aiChatMessages.find((item) => item.id === messageId);
-    if (!message || message.role !== "assistant" || message.routeActionStatus !== "pending") {
+    if (!message || message.role !== "assistant" || !["pending", "failed"].includes(message.routeActionStatus)) {
       return;
     }
     message.routeActionStatus = "rejected";
-    message.content = message.content.replace(/\n\n[^\n]*$/, `\n\n${getAIRouteActionLabel("rejected")}`);
+    message.routeActionError = "";
+    message.content = stripAIRouteActionTail(message.content);
+    clearAIRouteNotice();
     saveAIChatMessages(state.aiChatMessages);
     renderAIChatPanel();
     return;
@@ -1418,10 +1808,13 @@ function handleAIChatAction(event) {
 }
 
 function updateRouteActionMessage(message, status, extraMessage = "") {
-  const tail = getAIRouteActionLabel(status);
-  const base = String(message.content || "").replace(/\n\n[^\n]*$/, "").trim();
+  const base = stripAIRouteActionTail(message.content);
   message.routeActionStatus = status;
-  message.content = `${base}\n\n${tail}${extraMessage ? `（${extraMessage}）` : ""}`;
+  message.routeActionError = status === "failed" ? extraMessage : "";
+  message.content = base;
+  if (status === "failed") {
+    setAIRouteNotice(extraMessage || "路线添加失败");
+  }
 }
 
 function getRouteModeLabel(mode = "driving") {
@@ -1564,7 +1957,7 @@ async function applyAIRouteToMap(messageId) {
   if (!message || message.role !== "assistant") {
     return;
   }
-  if (message.routeActionStatus !== "pending") {
+  if (!["pending", "failed"].includes(message.routeActionStatus)) {
     return;
   }
   if (!isMapReady()) {
@@ -1586,11 +1979,53 @@ async function applyAIRouteToMap(messageId) {
     return;
   }
 
+  message.routeActionError = "";
+  clearAIRouteNotice();
   updateRouteActionMessage(message, "processing");
   saveAIChatMessages(state.aiChatMessages);
   renderAIChatPanel();
 
   try {
+    const response = await buildAIRoutes({
+      dayPlans: routeDayPlans,
+      preferredCity: normalizeTransitCity(message.routeTargetCity || ""),
+      existingColors: state.layers.map((item) => item.color)
+    });
+    const backendBuiltLayers = Array.isArray(response.layers) ? response.layers : [];
+    if (!backendBuiltLayers.length) {
+      throw new Error("可识别地点不足，无法生成路线");
+    }
+
+    state.layers.push(...backendBuiltLayers);
+    state.selectedLayerId = backendBuiltLayers[0].id;
+    state.editorVisible = true;
+    state.newRouteEditorOpen = false;
+    state.mobileRightOpen = false;
+
+    rebuildLayers();
+    state.mapService.fitLayers(backendBuiltLayers);
+    persistLayersState();
+    renderLeftPanel();
+    renderRightPanel();
+
+    const backendNotes = [];
+    if (response.inferredCity) {
+      backendNotes.push(`目标城市：${response.inferredCity}`);
+    }
+    if (Array.isArray(response.misses) && response.misses.length) {
+      backendNotes.push(
+        response.misses
+          .map((item) => `第${item.day}天未命中：${(item.places || []).join("、")}`)
+          .join("；")
+      );
+    }
+    updateRouteActionMessage(message, "accepted", backendNotes.join("\n"));
+    clearAIRouteNotice();
+    saveAIChatMessages(state.aiChatMessages);
+    renderAIChatPanel();
+    setToast("AI 路线已添加到地图", "success");
+    return;
+
     let latestUserPrompt = "";
     for (let i = messageIndex - 1; i >= 0; i -= 1) {
       const item = state.aiChatMessages[i];
@@ -1699,6 +2134,20 @@ async function applyAIRouteToMap(messageId) {
 }
 
 function handleAIChatKeydown(event) {
+  if (event.target?.dataset?.aiRenameInput) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const conversationId = event.target.dataset.aiRenameInput;
+      const actionTarget = document.querySelector(`[data-ai-action="save-rename-conversation"][data-conversation-id="${conversationId}"]`);
+      actionTarget?.click();
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      state.aiRenamingConversationId = "";
+      renderAIChatPanel();
+    }
+    return;
+  }
   if (event.target?.id !== "ai-chat-input") {
     return;
   }
@@ -1728,10 +2177,16 @@ function renderAIChatPanel() {
   const messagesHtml = state.aiChatMessages.length
     ? state.aiChatMessages
         .map(
-          (message) => `
+          (message) => {
+            const canRetryRoute = ["pending", "failed"].includes(message.routeActionStatus);
+            const visibleContent = message.role === "assistant" ? stripAIRouteActionTail(message.content) : message.content;
+            const routeStatus = message.routeActionStatus && message.routeActionStatus !== "pending"
+              ? `<span class="ai-route-status" data-status="${message.routeActionStatus}">${escapeHtml(getAIRouteActionLabel(message.routeActionStatus))}</span>`
+              : "";
+            return `
             <article class="ai-chat-message ${message.role === "user" ? "user" : "assistant"}">
               <div class="ai-chat-message-content">
-                <p>${escapeHtml(message.content)}</p>
+                <p>${escapeHtml(visibleContent)}</p>
                 ${
                   message.role === "assistant" && Array.isArray(message.routePlaces) && message.routePlaces.length >= 2
                     ? `<div class="ai-route-actions">
@@ -1740,35 +2195,102 @@ function renderAIChatPanel() {
                           data-message-id="${message.id}"
                           class="btn tiny"
                           type="button"
-                          ${message.routeActionStatus !== "pending" ? "disabled" : ""}
+                          ${canRetryRoute ? "" : "disabled"}
                         >是</button>
                         <button
                           data-ai-action="apply-route-no"
                           data-message-id="${message.id}"
                           class="btn tiny soft"
                           type="button"
-                          ${message.routeActionStatus !== "pending" ? "disabled" : ""}
+                          ${canRetryRoute ? "" : "disabled"}
                         >否</button>
+                        ${routeStatus}
                       </div>`
                     : ""
                 }
               </div>
             </article>
-          `
+          `;
+          }
         )
         .join("")
     : '<p class="muted ai-chat-empty">你好，我是你的路线助手。你可以问我路线规划、景点安排、出行建议等问题。</p>';
+  const currentConversation = state.aiConversations.find((item) => item.id === state.aiConversationId);
+  const conversationTitle = currentConversation?.title || "新对话";
+  const orderedAIConversations = [...state.aiConversations];
+  const historyHtml = state.aiHistoryOpen
+    ? `
+      <section class="ai-history-popover">
+        <div class="ai-history-head">
+          <strong>历史对话</strong>
+          <button data-ai-action="new-conversation" class="btn tiny primary" type="button">新建</button>
+        </div>
+        <div class="ai-history-toolbar">
+        </div>
+        <div class="ai-history-list">
+          ${
+            orderedAIConversations.length
+                ? orderedAIConversations
+                  .map(
+                    (conversation) => {
+                      const isRenaming = state.aiRenamingConversationId === conversation.id;
+                      return `
+                      <article class="ai-history-item ${conversation.id === state.aiConversationId ? "active" : ""} ${isRenaming ? "renaming" : ""}">
+                        <div
+                          ${isRenaming ? "" : `data-ai-action="select-conversation" data-conversation-id="${conversation.id}"`}
+                          class="ai-history-main"
+                          role="${isRenaming ? "group" : "button"}"
+                          tabindex="${isRenaming ? "-1" : "0"}"
+                        >
+                          ${
+                            isRenaming
+                              ? `<input
+                                  data-ai-rename-input="${conversation.id}"
+                                  class="ai-history-rename-input"
+                                  type="text"
+                                  value="${escapeHtml(conversation.title)}"
+                                  data-original-title="${escapeHtml(conversation.title)}"
+                                />`
+                              : `<strong>${escapeHtml(conversation.title)}</strong>`
+                          }
+                          <span>${escapeHtml(conversation.lastPreview || "空对话")}</span>
+                          <small>${conversation.messageCount || 0} 条消息</small>
+                        </div>
+                        <div class="ai-history-actions">
+                          ${
+                            isRenaming
+                              ? `<button data-ai-action="save-rename-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="保存名称" aria-label="保存名称">✓</button>`
+                              : `<button data-ai-action="rename-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="重命名对话" aria-label="重命名对话">✎</button>`
+                          }
+                          <button data-ai-action="delete-conversation" data-conversation-id="${conversation.id}" class="icon-btn delete" type="button" title="删除对话" aria-label="删除对话">×</button>
+                        </div>
+                      </article>
+                    `;
+                    }
+                  )
+                  .join("")
+              : '<p class="muted">暂无 AI 对话历史</p>'
+          }
+        </div>
+      </section>
+    `
+    : "";
 
   panel.classList.remove("floating-hidden");
   panel.classList.add("open-mobile");
   panel.innerHTML = `
     <div class="panel-header">
-      <h2>AI 路线助手</h2>
+      <div>
+        <h2>AI 路线助手</h2>
+        <p class="ai-conversation-title">${escapeHtml(conversationTitle)}</p>
+      </div>
       <div class="panel-header-actions">
-        <button data-ai-action="clear-history" class="btn soft ai-chat-head-btn" type="button">清除历史</button>
-        <button data-ai-action="toggle" class="btn soft ai-chat-head-btn" type="button">关闭</button>
+        <button data-ai-action="toggle-history" class="icon-tool-btn ${state.aiHistoryOpen ? "active" : ""}" type="button" title="历史" aria-label="历史">⏱</button>
+        <button data-ai-action="clear-history" class="icon-tool-btn" type="button" title="清空当前" aria-label="清空当前">clear</button>
+        <button data-ai-action="toggle" class="icon-tool-btn" type="button" title="关闭" aria-label="关闭">×</button>
       </div>
     </div>
+    ${historyHtml}
 
     <div class="ai-chat-body">
       <section class="panel-block ai-chat-thread-block">
@@ -1828,6 +2350,8 @@ function buildLayout() {
         <aside id="right-panel" class="side-panel right floating-hidden"></aside>
   <aside id="ai-chat-panel" class="side-panel right ai-chat-panel floating-hidden"></aside>
 
+        <div id="ai-route-notice" class="ai-route-notice hidden"></div>
+        <div id="floating-tooltip" class="floating-tooltip hidden"></div>
         <div id="key-warning" class="key-warning hidden"></div>
         <div id="status-toast" class="status-toast"></div>
       </main>
@@ -2206,12 +2730,16 @@ function renderRightPanel() {
   const points = layer.route.points || [];
   syncLayerSegmentModes(layer);
   const segments = layer.route.segmentModes || [];
+  ensureEditHistory(layer.id);
+  const canUndo = state.editHistory.undo.length > 0;
+  const canRedo = state.editHistory.redo.length > 0;
 
   panel.innerHTML = `
     <div class="panel-header">
       <h2>编辑：${layer.name}</h2>
       <div class="panel-header-actions">
-        <button data-action="focus-selected" class="btn soft" type="button">定位图层</button>
+        <button data-action="undo-edit" class="btn soft" type="button" ${canUndo ? "" : "disabled"}>后退</button>
+        <button data-action="redo-edit" class="btn soft" type="button" ${canRedo ? "" : "disabled"}>前进</button>
         <button data-action="close-editor" class="btn soft" type="button">关闭</button>
       </div>
     </div>
@@ -2262,11 +2790,14 @@ function renderRightPanel() {
         ${points
           .map((point, index) => {
             const canDelete = index > 0 && index < points.length - 1;
+            const nextPoint = points[index + 1];
+            const insertLabel = nextPoint ? `在 ${point.name} 和 ${nextPoint.name} 间加入途经点` : "";
+            const segmentMode = segments[index] || "driving";
+            const transitTools = getTransitToolsForLeg(layer.route, index);
             return `
-              <li>
+              <li data-action="point-focus" data-index="${index}" class="point-focus-item" title="点击定位该点">
                 <div>
                   <strong>${index + 1}. ${point.name}</strong>
-                  <small>${point.lng.toFixed(5)}, ${point.lat.toFixed(5)}</small>
                 </div>
                 <div class="point-edit-actions">
                   <button data-action="point-up" data-index="${index}" class="btn tiny" type="button">上移</button>
@@ -2278,16 +2809,34 @@ function renderRightPanel() {
                   }
                   <button data-action="point-replace-map" data-index="${index}" class="btn tiny" type="button">地图替换</button>
                 </div>
-                ${
-                  index < points.length - 1
-                    ? `<div class="between-actions">
-                        <button data-action="insert-between-map" data-index="${index}" class="btn tiny soft" type="button">在 ${
-                        index + 1
-                      } 和 ${index + 2} 之间插入途经点（地图）</button>
-                      </div>`
-                    : ""
-                }
               </li>
+              ${
+                nextPoint
+                  ? `<li class="point-connector-row" aria-hidden="false">
+                      <span class="point-insert-line"></span>
+                      <div class="point-connector-controls">
+                        <select data-action="layer-segment-mode" data-index="${index}" aria-label="${escapeHtml(
+                          `${point.name} 到 ${nextPoint.name} 的出行方式`
+                        )}">
+                          ${modeOptions(segmentMode)}
+                        </select>
+                        <button
+                          data-action="insert-between-map"
+                          data-index="${index}"
+                          class="point-insert-btn"
+                          type="button"
+                          aria-label="${escapeHtml(insertLabel)}"
+                          data-tooltip="${escapeHtml(insertLabel)}"
+                        >+</button>
+                      </div>
+                      ${
+                        segmentMode === "transit"
+                          ? `<p class="segment-tools inline">公共交通：${transitTools.length ? transitTools.join(" / ") : "暂无线路详情"}</p>`
+                          : ""
+                      }
+                    </li>`
+                  : ""
+              }
             `;
           })
           .join("")}
@@ -2295,33 +2844,7 @@ function renderRightPanel() {
     </section>
 
     <section class="panel-block">
-      <h3>分段交通方式</h3>
-      <div class="segment-list">
-        ${segments
-          .map((mode, index) => {
-            const transitTools = layer.route.segments?.[index]?.transitTools || [];
-            return `
-              <div class="segment-entry">
-                <div class="segment-row">
-                  <span>${index + 1}. ${compactPointName(points[index]?.name || `点${index + 1}`)} → ${compactPointName(
-                        points[index + 1]?.name || `点${index + 2}`
-                      )}</span>
-                  <select data-action="layer-segment-mode" data-index="${index}">
-                    ${modeOptions(mode)}
-                  </select>
-                </div>
-                ${
-                  mode === "transit"
-                    ? `<p class="segment-tools">公共交通：${transitTools.length ? transitTools.join(" / ") : "暂无线路详情"}</p>`
-                    : ""
-                }
-              </div>
-            `;
-          })
-          .join("")}
-      </div>
       <button data-action="recalc-layer" class="btn primary full" type="button">应用修改并重算路线</button>
-      <button data-action="save-layer" class="btn soft full" type="button">保存路线到本地缓存</button>
     </section>
   `;
 }
@@ -2486,6 +3009,28 @@ function collectStats(segments) {
   );
 }
 
+function getTransitToolsForLeg(route, legIndex) {
+  const routeSegments = route?.segments || [];
+  const hasLegIndex = routeSegments.some((segment) => Number.isInteger(Number(segment?.legIndex)));
+  const relatedSegments = hasLegIndex
+    ? routeSegments.filter((segment) => Number(segment?.legIndex) === legIndex)
+    : [routeSegments[legIndex]].filter(Boolean);
+  const tools = [];
+  const seen = new Set();
+
+  relatedSegments.forEach((segment) => {
+    (segment?.transitTools || []).forEach((tool) => {
+      const text = String(tool || "").trim();
+      if (text && !seen.has(text)) {
+        seen.add(text);
+        tools.push(text);
+      }
+    });
+  });
+
+  return tools;
+}
+
 function createRouteRecord({ points, segmentModes, segments, name }) {
   return normalizeRoute({
     id: createId("route"),
@@ -2557,11 +3102,12 @@ async function generateRouteLayer() {
       renderLeftPanel();
     }
 
-    const segments = await state.mapService.planRouteSegments(
+    const routePlan = await planRoute(
       points,
       state.draft.segmentModes,
       transitCity
     );
+    const segments = routePlan.segments || [];
 
     const layerName = nextLayerName(state.layers);
     const route = createRouteRecord({
@@ -2604,6 +3150,7 @@ async function recalcSelectedLayer() {
   syncLayerSegmentModes(layer);
 
   try {
+    pushEditHistory(layer);
     setToast("正在重算当前图层路线...");
     let transitCity = normalizeTransitCity(state.draft.transitCity) || "成都";
     if (hasTransitMode(layer.route.segmentModes || [])) {
@@ -2612,25 +3159,28 @@ async function recalcSelectedLayer() {
       renderLeftPanel();
     }
 
-    const segments = await state.mapService.planRouteSegments(
+    const routePlan = await planRoute(
       points,
       layer.route.segmentModes,
       transitCity
     );
+    const segments = routePlan.segments || [];
     layer.route.segments = segments;
     layer.route.stats = collectStats(segments);
     rebuildLayers();
     state.mapService.fitLayers([layer]);
     persistLayersState();
+    saveSelectedLayerToHistory({ showToast: false });
     renderRightPanel();
-    setToast("路线重算完成", "success");
+    setToast("路线重算完成，已自动保存到本地缓存", "success");
   } catch (error) {
     console.error(error);
     setToast(error.message || "重算失败", "danger");
   }
 }
 
-function saveSelectedLayerToHistory() {
+function saveSelectedLayerToHistory(options = {}) {
+  const { showToast = true } = options;
   const layer = getSelectedLayer();
   if (!layer) {
     return;
@@ -2661,7 +3211,9 @@ function saveSelectedLayerToHistory() {
   state.historyRoutes = upsertHistoryRoute(payload);
   persistLayersState();
   renderHistoryOverlay();
-  setToast("路线已保存到本地缓存", "success");
+  if (showToast) {
+    setToast("路线已保存到本地缓存", "success");
+  }
 }
 
 function deleteLayer(layerId) {
@@ -2773,15 +3325,24 @@ function loadHistoryRouteToMap(historyId) {
   setToast("历史路线已加载到当前地图，可继续编辑", "success");
 }
 
-function applyMapPick(point) {
+async function applyMapPick(point) {
   if (!state.pickMode) {
     return;
   }
 
+  let resolved = null;
+  try {
+    resolved = await state.mapService.reverseGeocodePoint(point);
+  } catch (error) {
+    console.warn("地图点位命名失败，使用默认名称", error);
+  }
+
   const mapPoint = createPoint({
-    name: `地图点(${point.lng.toFixed(4)}, ${point.lat.toFixed(4)})`,
+    name: resolved?.name || "地图点",
     lng: point.lng,
-    lat: point.lat
+    lat: point.lat,
+    address: resolved?.address || "",
+    city: resolved?.city || ""
   });
 
   if (state.pickMode.type === "draft-start") {
@@ -2821,6 +3382,7 @@ function applyMapPick(point) {
 
   if (state.pickMode.type === "replace-layer-point") {
     const index = state.pickMode.index;
+    pushEditHistory(layer);
     layer.route.points[index] = mapPoint;
     persistLayersState();
     renderRightPanel();
@@ -2831,6 +3393,7 @@ function applyMapPick(point) {
 
   if (state.pickMode.type === "insert-layer-point") {
     const index = state.pickMode.index;
+    pushEditHistory(layer);
     layer.route.points.splice(index + 1, 0, mapPoint);
     syncLayerSegmentModes(layer);
     persistLayersState();
@@ -2920,9 +3483,11 @@ function handleLeftPanelAction(event) {
 
       try {
         if (selectedFormat === "json") {
-          downloadBlob(new Blob([JSON.stringify(exportLayers, null, 2)], { type: "application/json" }), "voyage_routes_data.json");
+          const content = await exportRouteData("json", exportLayers);
+          downloadBlob(new Blob([content], { type: "application/json" }), "voyage_routes_data.json");
         } else if (selectedFormat === "gpx") {
-          downloadBlob(new Blob([createGpxFromLayers(exportLayers)], { type: "application/gpx+xml" }), "voyage_routes_export.gpx");
+          const content = await exportRouteData("gpx", exportLayers);
+          downloadBlob(new Blob([content], { type: "application/gpx+xml" }), "voyage_routes_export.gpx");
         } else if (selectedFormat === "png" || selectedFormat === "pdf") {
           setToast("正在导出地图截图...", "info");
           await exportCheckedRoutesAsMap(selectedFormat, exportLayers);
@@ -2983,6 +3548,11 @@ function handleLeftPanelAction(event) {
         link.click();
       }
     };
+    return;
+  }
+
+  if (action === "close-ai-route-notice") {
+    clearAIRouteNotice();
     return;
   }
 
@@ -3118,21 +3688,13 @@ function handleLeftPanelAction(event) {
   if (action === "layer-select") {
     closeAIChatForRouteEdit();
     const nextId = target.dataset.layerId;
-    const isSame = state.selectedLayerId === nextId;
-    if (isSame && state.editorVisible && !state.newRouteEditorOpen) {
-      state.editorVisible = false;
-      state.mobileRightOpen = false;
-      renderLeftPanel();
-      renderRightPanel();
-      return;
-    }
-
     state.selectedLayerId = nextId;
     state.editorVisible = true;
     state.newRouteEditorOpen = false;
     state.mobileRightOpen = true;
     renderLeftPanel();
     renderRightPanel();
+    focusLayer(nextId);
     return;
   }
 
@@ -3291,6 +3853,7 @@ function handleRightPanelAction(event) {
     ensureLayerRoutes(layer);
     persistLayersState();
     renderRightPanel();
+    focusLayer(layer.id);
     return;
   }
 
@@ -3327,8 +3890,13 @@ function handleRightPanelAction(event) {
     return;
   }
 
-  if (action === "focus-selected") {
-    focusLayer(layer.id);
+  if (action === "undo-edit") {
+    undoLayerEdit();
+    return;
+  }
+
+  if (action === "redo-edit") {
+    redoLayerEdit();
     return;
   }
 
@@ -3338,6 +3906,9 @@ function handleRightPanelAction(event) {
     }
 
     const field = target.dataset.field;
+    if (event.type === "change") {
+      pushEditHistory(layer);
+    }
     layer.meta[field] = target.value;
 
     if (field === "name" && (layer.routes || []).length === 1) {
@@ -3356,6 +3927,7 @@ function handleRightPanelAction(event) {
   if (action === "point-up") {
     const index = Number(target.dataset.index);
     if (index > 0) {
+      pushEditHistory(layer);
       const temp = layer.route.points[index - 1];
       layer.route.points[index - 1] = layer.route.points[index];
       layer.route.points[index] = temp;
@@ -3366,9 +3938,21 @@ function handleRightPanelAction(event) {
     return;
   }
 
+  if (action === "point-focus") {
+    const index = Number(target.dataset.index);
+    const point = layer.route.points[index];
+    if (!point || !isMapReady()) {
+      return;
+    }
+    state.mapService.focusPoint(point, index, layer);
+    setToast(`已定位到：${point.name}`);
+    return;
+  }
+
   if (action === "point-down") {
     const index = Number(target.dataset.index);
     if (index < layer.route.points.length - 1) {
+      pushEditHistory(layer);
       const temp = layer.route.points[index + 1];
       layer.route.points[index + 1] = layer.route.points[index];
       layer.route.points[index] = temp;
@@ -3384,6 +3968,7 @@ function handleRightPanelAction(event) {
     if (index <= 0 || index >= layer.route.points.length - 1) {
       return;
     }
+    pushEditHistory(layer);
     layer.route.points.splice(index, 1);
     syncLayerSegmentModes(layer);
     persistLayersState();
@@ -3403,6 +3988,7 @@ function handleRightPanelAction(event) {
 
   if (action === "layer-segment-mode") {
     const index = Number(target.dataset.index);
+    pushEditHistory(layer);
     layer.route.segmentModes[index] = target.value;
     persistLayersState();
     return;
@@ -3411,10 +3997,6 @@ function handleRightPanelAction(event) {
   if (action === "recalc-layer") {
     recalcSelectedLayer();
     return;
-  }
-
-  if (action === "save-layer") {
-    saveSelectedLayerToHistory();
   }
 }
 
@@ -3508,7 +4090,7 @@ async function doSearch() {
     state.searchResultsOpen = true;
     state.searchSuggestionsOpen = false;
     state.searchSuggestions = [];
-    const { pois, fallbackUsed, searchCity } = await state.mapService.searchPOI(keyword);
+    const { pois, fallbackUsed, searchCity } = await requestSearchPOI(keyword);
     state.searchResults = pois.slice(0, 8);
     renderSearchResults();
     state.mapService.renderSearchMarkers(state.searchResults, (poi) => {
@@ -3564,7 +4146,7 @@ function scheduleSearchSuggestions() {
 
   state.searchSuggestTimer = window.setTimeout(async () => {
     try {
-      const suggestions = await state.mapService.getSearchSuggestions(keyword);
+      const { suggestions } = await requestSearchSuggestions(keyword);
       if ((document.getElementById("search-input")?.value?.trim() || "") !== keyword) {
         return;
       }
@@ -3667,10 +4249,35 @@ function bindEvents() {
   rightPanel.addEventListener("click", handleRightPanelAction);
   rightPanel.addEventListener("change", handleRightPanelAction);
   rightPanel.addEventListener("input", handleRightPanelAction);
+  rightPanel.addEventListener("mouseover", (event) => {
+    const target = event.target.closest("[data-tooltip]");
+    if (target && rightPanel.contains(target)) {
+      showFloatingTooltip(target, target.dataset.tooltip);
+    }
+  });
+  rightPanel.addEventListener("mouseout", (event) => {
+    const target = event.target.closest("[data-tooltip]");
+    if (target && rightPanel.contains(target)) {
+      hideFloatingTooltip();
+    }
+  });
   rightPanel.addEventListener("change", handleLeftPanelInput);
   rightPanel.addEventListener("input", handleLeftPanelInput);
   aiChatPanel.addEventListener("click", handleAIChatAction);
   aiChatPanel.addEventListener("keydown", handleAIChatKeydown);
+  aiChatPanel.addEventListener("focusout", (event) => {
+    const conversationId = event.target?.dataset?.aiRenameInput;
+    if (!conversationId) {
+      return;
+    }
+    window.setTimeout(() => {
+      if (document.activeElement?.closest(`[data-conversation-id="${conversationId}"]`)) {
+        return;
+      }
+      const actionTarget = document.querySelector(`[data-ai-action="save-rename-conversation"][data-conversation-id="${conversationId}"]`);
+      actionTarget?.click();
+    }, 0);
+  });
 
   searchBtn.addEventListener("click", doSearch);
   aiChatBtn?.addEventListener("click", () => {
@@ -3771,6 +4378,10 @@ async function initMap() {
 }
 
 async function boot() {
+  const aiChatState = await initAIChatStore(loadAIChatMessages());
+  state.aiConversations = aiChatState.conversations;
+  state.aiConversationId = aiChatState.currentConversationId;
+  state.aiChatMessages = aiChatState.messages;
   state.layers = normalizeLayers(state.layers);
   if (state.selectedLayerId && !state.layers.some((layer) => layer.id === state.selectedLayerId)) {
     state.selectedLayerId = null;

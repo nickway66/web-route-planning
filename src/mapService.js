@@ -1,6 +1,20 @@
 const SCRIPT_ID = "amap-jsapi-loader";
 const SCREENSHOT_SCRIPT_ID = "amap-screenshot-loader";
 const SCREENSHOT_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/@amap/screenshot/dist/index.js";
+const SUBWAY_LINE_COLORS = [
+  "#e23b3b",
+  "#28a745",
+  "#f2b705",
+  "#6f42c1",
+  "#00a3e0",
+  "#d63384",
+  "#20c997",
+  "#fd7e14",
+  "#0d6efd",
+  "#6c757d",
+  "#8bc34a",
+  "#795548"
+];
 
 function parseLngLatPoint(point) {
   if (!point) {
@@ -166,6 +180,85 @@ function parseRouteDuration(route) {
   return 0;
 }
 
+function parseRouteMetric(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : fallback;
+}
+
+function isSubwayLine(name = "") {
+  const text = String(name || "").toLowerCase();
+  return ["地铁", "轨道", "轻轨", "metro", "subway", "mtr"].some((keyword) => text.includes(keyword));
+}
+
+function getSubwayLineColor(name = "") {
+  const text = String(name || "");
+  const numberMatch = text.match(/(\d+)/);
+  const index = numberMatch
+    ? Math.max(1, Number(numberMatch[1])) - 1
+    : [...text].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return SUBWAY_LINE_COLORS[index % SUBWAY_LINE_COLORS.length];
+}
+
+function getTransitToolName(segment = {}) {
+  return String((segment.transitTools || []).find(Boolean) || segment.lineName || segment.name || "").trim();
+}
+
+function makeRouteSegment(mode, path = [], source = {}, transitTools = [], transitKind = "", transitColor = "") {
+  const dedupedPath = dedupePath(path);
+  if (dedupedPath.length < 2) {
+    return null;
+  }
+  const segment = {
+    mode,
+    distance: parseRouteMetric(source?.distance, calcPathDistanceMeters(dedupedPath)),
+    duration: parseRouteMetric(source?.duration ?? source?.time, 0),
+    path: dedupedPath,
+    transitTools
+  };
+  if (transitKind) {
+    segment.transitKind = transitKind;
+  }
+  if (transitColor) {
+    segment.transitColor = transitColor;
+  }
+  return segment;
+}
+
+function getTransitKind(segment = {}) {
+  if (segment.mode !== "transit") {
+    return "";
+  }
+  if (segment.transitKind === "subway") {
+    return "subway";
+  }
+  if (segment.transitKind === "bus") {
+    return "bus";
+  }
+  return isSubwayLine(getTransitToolName(segment)) ? "subway" : "bus";
+}
+
+function getSegmentStrokeColor(segment = {}, routeColor = "#1687ff") {
+  return routeColor;
+}
+
+function getSegmentStrokeStyle(segment = {}) {
+  const transitKind = getTransitKind(segment);
+  return segment.mode === "walking" || (segment.mode === "transit" && transitKind === "subway") ? "dashed" : "solid";
+}
+
+function getSegmentDashArray(segment = {}) {
+  if (segment.mode === "walking") {
+    return [6, 8];
+  }
+  if (segment.mode === "transit" && getTransitKind(segment) === "subway") {
+    return [18, 10];
+  }
+  return undefined;
+}
+
 function pushPath(path, points = []) {
   if (!Array.isArray(points) || !points.length) {
     return;
@@ -176,6 +269,100 @@ function pushPath(path, points = []) {
       path.push(p);
     }
   });
+}
+
+function parseWalkingTransitSegment(walking = {}) {
+  const path = [
+    ...parsePolylineString(walking?.polyline || ""),
+    ...flattenStepPath(walking?.steps || []),
+    ...flattenStepPolyline(walking?.steps || [])
+  ];
+  return makeRouteSegment("walking", path, walking);
+}
+
+function parseTransitBusLine(line = {}) {
+  const path = [...parsePolylineString(line?.polyline || "")];
+  pushPath(path, line?.path || []);
+  const tool = String(line?.name || line?.busline?.name || line?.lineName || "").trim();
+  const transitKind = isSubwayLine(tool) ? "subway" : "bus";
+  return makeRouteSegment(
+    "transit",
+    path,
+    line,
+    tool ? [tool] : [],
+    transitKind,
+    transitKind === "subway" ? getSubwayLineColor(tool) : ""
+  );
+}
+
+function parseTransitRailLine(rail = {}) {
+  const path = [...parsePolylineString(rail?.polyline || "")];
+  pushPath(path, rail?.path || []);
+  const tool = String(rail?.name || rail?.trip || "").trim();
+  const transitKind = isSubwayLine(tool) ? "subway" : "rail";
+  return makeRouteSegment(
+    "transit",
+    path,
+    rail,
+    tool ? [tool] : [],
+    transitKind,
+    transitKind === "subway" ? getSubwayLineColor(tool) : ""
+  );
+}
+
+function parseTransitPlanSegments(plan = {}) {
+  const parsedSegments = [];
+  const rawSegments = Array.isArray(plan?.segments) ? plan.segments : [];
+
+  rawSegments.forEach((segment) => {
+    [segment?.walking, segment?.entrance].forEach((walkingSource) => {
+      const walking = parseWalkingTransitSegment(walkingSource || {});
+      if (walking) {
+        parsedSegments.push(walking);
+      }
+    });
+
+    const exitWalking = parseWalkingTransitSegment(segment?.exit || {});
+    const appendExitWalking = () => {
+      if (exitWalking) {
+        parsedSegments.push(exitWalking);
+      }
+    };
+
+    const transitCountBefore = parsedSegments.length;
+
+    const busLines = [
+      ...(segment?.bus?.buslines || []),
+      ...(segment?.transit?.bus?.buslines || [])
+    ];
+    busLines.forEach((line) => {
+      const busLine = parseTransitBusLine(line);
+      if (busLine) {
+        parsedSegments.push(busLine);
+      }
+    });
+
+    const legacyBusline = parseTransitBusLine(segment?.busline || {});
+    if (legacyBusline) {
+      parsedSegments.push(legacyBusline);
+    }
+
+    const rail = parseTransitRailLine(segment?.railway || segment?.rail || {});
+    if (rail) {
+      parsedSegments.push(rail);
+    }
+
+    if (parsedSegments.length > transitCountBefore || !parsedSegments.includes(exitWalking)) {
+      appendExitWalking();
+    }
+  });
+
+  if (parsedSegments.length) {
+    return parsedSegments;
+  }
+
+  const fallback = makeRouteSegment("transit", parsePolylineString(plan?.polyline || ""), plan, collectTransitTools(plan));
+  return fallback ? [fallback] : [];
 }
 
 function normalizeCityText(city) {
@@ -220,16 +407,17 @@ function collectTransitTools(plan = {}) {
   return tools;
 }
 
-function lineShift(path, shiftSeed = 0) {
-  if (!shiftSeed) {
-    return path;
-  }
-  const delta = shiftSeed * 0.00002;
-  return path.map(([lng, lat]) => [lng + delta, lat + delta]);
-}
-
 function makePointHtml(index, color) {
   return `<div class="point-marker" style="--point-color:${color}"><span>${index + 1}</span></div>`;
+}
+
+function getPointDisplayPosition(point) {
+  if (!point) {
+    return null;
+  }
+  const lng = Number(point.displayLng ?? point.lng);
+  const lat = Number(point.displayLat ?? point.lat);
+  return Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : null;
 }
 
 function modeToPlugin(mode) {
@@ -371,7 +559,7 @@ export class MapService {
     await this.ensurePlugins(["AMap.Geocoder"]);
     if (!this.geocoder) {
       this.geocoder = new window.AMap.Geocoder({
-        extensions: "base"
+        extensions: "all"
       });
     }
     return this.geocoder;
@@ -424,6 +612,50 @@ export class MapService {
       return null;
     }
     return this.map.getBounds();
+  }
+
+  async reverseGeocodePoint(point) {
+    if (!point) {
+      return null;
+    }
+
+    const lng = Number(point.lng);
+    const lat = Number(point.lat);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return null;
+    }
+
+    const geocoder = await this.ensureGeocoder();
+    return new Promise((resolve, reject) => {
+      geocoder.getAddress([lng, lat], (status, result) => {
+        if (status !== "complete") {
+          reject(new Error("逆地理编码失败"));
+          return;
+        }
+
+        const regeocode = result?.regeocode || {};
+        const component = regeocode.addressComponent || {};
+        const firstPoi = Array.isArray(regeocode.pois) ? regeocode.pois[0] : null;
+        const road = component?.streetNumber?.street || component?.road || component?.street || "";
+        const number = component?.streetNumber?.number || "";
+        const roadName = [road, number].filter(Boolean).join("");
+        const formattedTail = String(regeocode.formattedAddress || "")
+          .replace(String(component.province || ""), "")
+          .replace(String(component.city || ""), "")
+          .replace(String(component.district || ""), "")
+          .replace(String(component.township || ""), "")
+          .trim();
+        const name = String(firstPoi?.name || roadName || formattedTail || "地图点").trim();
+
+        resolve({
+          name,
+          address: "",
+          city: normalizeCityText(component.city || component.province || ""),
+          lng,
+          lat
+        });
+      });
+    });
   }
 
   getViewState() {
@@ -984,62 +1216,14 @@ export class MapService {
           return;
         }
 
-        const path = [];
-        const segments = plan.segments || [];
-
-        pushPath(path, parsePolylineString(plan?.polyline || ""));
-
-        segments.forEach((segment) => {
-          pushPath(path, segment?.path || []);
-          pushPath(path, segment?.transit?.path || []);
-
-          const walkingPath = flattenStepPath(segment?.walking?.steps || []);
-          path.push(...walkingPath);
-          path.push(...parsePolylineString(segment?.walking?.polyline || ""));
-
-          const busLines = segment?.bus?.buslines || [];
-          busLines.forEach((line) => {
-            path.push(...parsePolylineString(line.polyline || ""));
-            pushPath(path, line?.via_stops || []);
-            pushPath(path, line?.path || []);
-          });
-
-          const transitBusLines = segment?.transit?.bus?.buslines || [];
-          transitBusLines.forEach((line) => {
-            path.push(...parsePolylineString(line.polyline || ""));
-            pushPath(path, line?.via_stops || []);
-            pushPath(path, line?.path || []);
-          });
-
-          const legacyBusline = segment?.busline;
-          if (legacyBusline?.polyline) {
-            path.push(...parsePolylineString(legacyBusline.polyline));
-          }
-
-          const rail = segment?.railway || segment?.rail;
-          if (rail && rail.polyline) {
-            path.push(...parsePolylineString(rail.polyline));
-          }
-
-          pushPath(path, rail?.path || []);
-        });
-
-        const dedupedPath = dedupePath(path);
-        if (dedupedPath.length < 2) {
+        const segments = parseTransitPlanSegments(plan);
+        if (!segments.length) {
           console.warn("Transit parse payload", result);
           reject(new Error("公交路径解析失败，请更换起终点或公交城市"));
           return;
         }
 
-        const transitTools = collectTransitTools(plan);
-
-        resolve({
-          mode: "transit",
-          distance: parseRouteDistance(plan, dedupedPath),
-          duration: parseRouteDuration(plan),
-          path: dedupedPath,
-          transitTools
-        });
+        resolve(segments);
       });
     });
   }
@@ -1056,7 +1240,10 @@ export class MapService {
     const results = [];
     for (let i = 0; i < tasks.length; i += 1) {
       const segment = await tasks[i];
-      results.push(segment);
+      const plannedSegments = Array.isArray(segment) ? segment : [segment];
+      plannedSegments.forEach((item) => {
+        results.push({ ...item, legIndex: i, requestedMode: segmentModes[i] || "driving" });
+      });
     }
 
     return results;
@@ -1078,10 +1265,12 @@ export class MapService {
     (route.segments || []).forEach((segment) => {
       const polyline = new window.AMap.Polyline({
         path: segment.path || [],
-        strokeColor: color,
+        strokeColor: getSegmentStrokeColor(segment, color),
         strokeOpacity: 0.65,
         strokeWeight: 5,
-        strokeStyle: "solid",
+        strokeStyle: getSegmentStrokeStyle(segment),
+        strokeDasharray: getSegmentDashArray(segment),
+        lineCap: "round",
         zIndex: 68
       });
       polyline.setMap(this.map);
@@ -1089,8 +1278,12 @@ export class MapService {
     });
 
     (route.points || []).forEach((point, index) => {
+      const displayPosition = getPointDisplayPosition(point);
+      if (!displayPosition) {
+        return;
+      }
       const marker = new window.AMap.Marker({
-        position: [point.lng, point.lat],
+        position: displayPosition,
         anchor: "center",
         content: makePointHtml(index, color),
         zIndex: 72
@@ -1130,13 +1323,14 @@ export class MapService {
 
       (route.segments || []).forEach((segment) => {
         const basePath = segment.path || [];
-        const shiftedPath = lineShift(basePath, shift);
+        const shiftedPath = basePath;
         const polyline = new window.AMap.Polyline({
           path: shiftedPath,
-          strokeColor: color,
+          strokeColor: getSegmentStrokeColor(segment, color),
           strokeOpacity: routeVisible ? 0.93 : 0,
           strokeWeight: 5,
-          strokeStyle: segment.mode === "transit" ? "dashed" : "solid",
+          strokeStyle: getSegmentStrokeStyle(segment),
+          strokeDasharray: getSegmentDashArray(segment),
           lineJoin: "round",
           lineCap: "round",
           zIndex: routeVisible ? 80 + shift : 1,
@@ -1149,8 +1343,12 @@ export class MapService {
       });
 
       (route.points || []).forEach((point, pointIndex) => {
+        const displayPosition = getPointDisplayPosition(point);
+        if (!displayPosition) {
+          return;
+        }
         const marker = new window.AMap.Marker({
-          position: [point.lng, point.lat],
+          position: displayPosition,
           anchor: "center",
           content: makePointHtml(pointIndex, color),
           zIndex: routeVisible ? 130 + shift + pointIndex : 1
@@ -1165,7 +1363,7 @@ export class MapService {
               <p>${route.meta?.name || layer.name} · 顺序 ${pointIndex + 1}</p>
             </div>
           `);
-          this.poiInfoWindow.open(this.map, [point.lng, point.lat]);
+          this.poiInfoWindow.open(this.map, displayPosition);
         });
         marker.setMap(routeVisible ? this.map : null);
         overlays.push(marker);
@@ -1209,13 +1407,45 @@ export class MapService {
     if (!this.map || !points.length) {
       return;
     }
-    const markers = points.map(
-      (point) =>
-        new window.AMap.Marker({
-          position: [point.lng, point.lat]
-        })
-    );
+    const markers = points
+      .map((point) => {
+        const displayPosition = getPointDisplayPosition(point);
+        if (!displayPosition) {
+          return null;
+        }
+        return new window.AMap.Marker({
+          position: displayPosition
+        });
+      })
+      .filter(Boolean);
+    if (!markers.length) {
+      return;
+    }
     this.map.setFitView(markers, false, [100, 100, 100, 100]);
+  }
+
+  focusPoint(point, index = 0, layer = null) {
+    if (!this.map || !point) {
+      return;
+    }
+
+    const displayPosition = getPointDisplayPosition(point);
+    if (!displayPosition) {
+      return;
+    }
+
+    const zoom = Math.max(Number(this.map.getZoom()) || 5, 15);
+    this.map.setZoomAndCenter(zoom, displayPosition);
+
+    if (this.poiInfoWindow) {
+      this.poiInfoWindow.setContent(`
+        <div class="poi-info-window">
+          <h4>${point.name || `点位 ${index + 1}`}</h4>
+          <p>${layer?.route?.meta?.name || layer?.name || "当前路线"} · 顺序 ${index + 1}</p>
+        </div>
+      `);
+      this.poiInfoWindow.open(this.map, displayPosition);
+    }
   }
 
   setEditorOverlayOpen(open) {

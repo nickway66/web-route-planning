@@ -122,9 +122,29 @@ body {
 }
 
 .ai-chat-head-btn {
-  width: 88px;
+  min-width: 72px;
+  width: auto;
   padding-left: 0;
   padding-right: 0;
+}
+
+.icon-tool-btn {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid rgba(130, 170, 255, 0.32);
+  border-radius: 9px;
+  background: var(--surface-btn);
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-tool-btn:hover,
+.icon-tool-btn.active {
+  border-color: rgba(55, 196, 255, 0.72);
+  background: var(--surface-btn-soft);
 }
 
 .panel-block {
@@ -397,6 +417,34 @@ textarea {
   font: inherit;
 }
 
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  color: var(--text);
+  background:
+    linear-gradient(45deg, transparent 50%, var(--accent) 50%) calc(100% - 16px) 50% / 6px 6px no-repeat,
+    linear-gradient(135deg, var(--accent) 50%, transparent 50%) calc(100% - 11px) 50% / 6px 6px no-repeat,
+    var(--surface-input);
+  padding-right: 30px;
+  cursor: pointer;
+}
+
+select:hover {
+  border-color: rgba(55, 196, 255, 0.72);
+  background-color: var(--surface-card-soft);
+}
+
+select:focus {
+  outline: none;
+  border-color: rgba(43, 209, 255, 0.92);
+  box-shadow: 0 0 0 2px rgba(43, 209, 255, 0.16);
+}
+
+select option {
+  color: #10223f;
+  background: #f4f9ff;
+}
+
 label {
   display: block;
   font-size: 0.83rem;
@@ -500,6 +548,17 @@ label {
   margin: 6px 0 0;
   font-size: 0.78rem;
   color: var(--text-muted);
+}
+
+.segment-tools.inline {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  max-width: 88%;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--surface-card-soft);
+  font-size: 0.72rem;
 }
 
 .layer-item {
@@ -628,6 +687,109 @@ label {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.edit-points li.point-focus-item {
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.edit-points li.point-focus-item:hover {
+  border-color: rgba(55, 196, 255, 0.72);
+  transform: translateY(-1px);
+}
+
+.edit-points li.point-insert-row,
+.edit-points li.point-connector-row {
+  position: relative;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.point-insert-line {
+  position: absolute;
+  top: -8px;
+  bottom: -8px;
+  left: 50%;
+  width: 1px;
+  background: rgba(55, 196, 255, 0.38);
+  transform: translateX(-50%);
+}
+
+.point-connector-controls {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) 24px;
+  align-items: center;
+  gap: 8px;
+  width: min(210px, 78%);
+  padding: 5px;
+  border: 1px solid rgba(55, 196, 255, 0.28);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--surface-card-strong), var(--surface-card-soft));
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+}
+
+.point-connector-controls select {
+  margin: 0;
+  height: 30px;
+  min-width: 0;
+  padding: 4px 30px 4px 10px;
+  border-radius: 9px;
+  font-size: 0.78rem;
+  background-color: var(--surface-btn-soft);
+}
+
+.point-insert-btn {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(55, 196, 255, 0.64);
+  border-radius: 50%;
+  background: var(--surface-btn-soft);
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 20px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.point-insert-btn:hover {
+  transform: scale(1.08);
+  border-color: rgba(55, 196, 255, 0.95);
+  background: var(--surface-card-strong);
+}
+
+.floating-tooltip {
+  position: fixed;
+  z-index: 80;
+  max-width: 240px;
+  padding: 6px 8px;
+  border: 1px solid rgba(119, 167, 253, 0.38);
+  border-radius: 8px;
+  background: var(--surface-toast);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
+  pointer-events: none;
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
 }
 
 .edit-points small {
@@ -845,7 +1007,7 @@ label {
 
 .ai-chat-panel {
   z-index: 24;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   flex-direction: column;
 }
@@ -900,12 +1062,171 @@ label {
 
 .ai-route-actions {
   display: inline-flex;
+  align-items: center;
   gap: 8px;
   padding-left: 2px;
 }
 
+.ai-conversation-title {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-history-popover {
+  position: absolute;
+  top: 62px;
+  right: calc(100% + 12px);
+  width: 320px;
+  max-height: calc(100% - 80px);
+  z-index: 26;
+  border: 1px solid rgba(120, 166, 255, 0.32);
+  border-radius: 12px;
+  padding: 10px;
+  background: linear-gradient(135deg, var(--frost-strong), var(--frost-soft));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  overflow: hidden;
+}
+
+.ai-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ai-history-list {
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-history-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid rgba(110, 158, 255, 0.22);
+  border-radius: 10px;
+  background: var(--surface-card-soft);
+  padding: 8px 54px 8px 8px;
+}
+
+.ai-history-item.active {
+  border-color: rgba(55, 196, 255, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(55, 196, 255, 0.22);
+}
+
+.ai-history-main {
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.ai-history-item.renaming .ai-history-main {
+  cursor: default;
+}
+
+.ai-history-rename-input {
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  font-size: 0.82rem;
+}
+
+.ai-history-main strong,
+.ai-history-main span,
+.ai-history-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-history-main span,
+.ai-history-main small {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  margin-top: 3px;
+}
+
+.ai-history-actions {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.ai-history-actions .icon-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.18);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+}
+
 .ai-route-actions .btn {
   min-width: 44px;
+}
+
+.ai-route-status {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.ai-route-status[data-status="failed"] {
+  color: var(--danger);
+}
+
+.ai-route-notice {
+  position: absolute;
+  right: 392px;
+  bottom: 18px;
+  z-index: 25;
+  width: min(360px, calc(100% - 420px));
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 127, 81, 0.62);
+  border-radius: 12px;
+  background: var(--surface-toast);
+  color: var(--text);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+
+.ai-route-notice strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+.ai-route-notice p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .ai-chat-message.user {
@@ -1032,5 +1353,20 @@ label {
 
   .history-overlay {
     inset: 10px;
+  }
+
+  .ai-route-notice {
+    left: 10px;
+    right: 10px;
+    bottom: 72px;
+    width: auto;
+  }
+
+  .ai-history-popover {
+    left: 10px;
+    right: 10px;
+    top: 58px;
+    width: auto;
+    max-height: 260px;
   }
 }
