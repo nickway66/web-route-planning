@@ -8,6 +8,7 @@ from .amap import AMapClient, haversine_meters, route_stats
 
 
 LAYER_COLORS = ["#2bd1ff", "#24e0a4", "#ffd166", "#ff7f51", "#f5f7fa", "#00f5d4", "#f4a261", "#e9c46a", "#66e3ff", "#8ecae6"]
+ROUTE_COST_OPTIMIZATION_POINT_LIMIT = 3
 
 
 def create_id(prefix: str) -> str:
@@ -69,6 +70,8 @@ def nearest_neighbor_order(points: list[dict[str, Any]], cost: dict[tuple[int, i
 async def optimize_point_order_by_route_cost(amap: AMapClient, points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(points) <= 2:
         return points
+    if len(points) > ROUTE_COST_OPTIMIZATION_POINT_LIMIT:
+        return optimize_point_order(points)
     try:
         cost = await build_route_cost_matrix(amap, points)
         return nearest_neighbor_order(points, cost)

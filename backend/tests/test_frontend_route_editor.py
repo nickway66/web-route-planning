@@ -57,3 +57,46 @@ def test_route_markers_prefer_display_location_for_large_pois():
     assert "const displayPosition = getPointDisplayPosition(point);" in source
     assert "this.poiInfoWindow.open(this.map, displayPosition);" in source
     assert "this.map.setZoomAndCenter(zoom, displayPosition);" in source
+
+
+def test_route_points_can_be_reordered_with_sortable_without_recalc():
+    source = MAIN_JS.read_text(encoding="utf-8")
+
+    assert 'import Sortable from "sortablejs";' in source
+    assert "function initPointSortable()" in source
+    assert 'data-sortable="route-points"' in source
+    assert 'data-point-index="${index}"' in source
+    assert "Sortable.create(list" in source
+    assert "draggable: \".point-focus-item\"" in source
+    assert "filter: \"button, select, input, textarea\"" in source
+    assert "point-drag-handle" not in source
+    assert 'data-action="point-drag"' not in source
+    assert "function applyDraggedPointOrder(layer, orderedIndexes)" in source
+
+    drag_block = source[source.index("function applyDraggedPointOrder") : source.index("function renderHistoryOverlay")]
+    assert "layer.route.points = orderedIndexes.map" in drag_block
+    assert "syncLayerSegmentModes(layer)" in drag_block
+    assert "persistLayersState()" in drag_block
+    assert "recalcSelectedLayer()" not in drag_block
+
+
+def test_ai_route_notice_close_button_has_direct_event_binding():
+    source = MAIN_JS.read_text(encoding="utf-8")
+
+    assert 'const aiRouteNotice = document.getElementById("ai-route-notice");' in source
+    assert 'aiRouteNotice?.addEventListener("click"' in source
+    assert 'target.closest("[data-action=\'close-ai-route-notice\']")' in source
+    assert "clearAIRouteNotice();" in source
+
+
+def test_route_point_cards_use_delete_icon_and_footer_map_replace():
+    source = MAIN_JS.read_text(encoding="utf-8")
+
+    assert 'class="point-card-main"' in source
+    assert 'class="icon-btn delete point-delete-btn"' in source
+    assert 'class="point-card-footer"' in source
+    assert 'data-action="point-replace-map"' in source
+    assert 'data-action="point-up"' not in source
+    assert 'data-action="point-down"' not in source
+    assert 'if (layer.route.points.length <= 2)' in source
+    assert 'setToast("路线至少保留两个地点", "warning")' in source

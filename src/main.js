@@ -1,6 +1,7 @@
 import "./styles.css";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import Sortable from "sortablejs";
 import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
 import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI } from "./apiClient";
 import {
@@ -893,7 +894,8 @@ const state = {
   pickMode: null,
   toastTimer: null,
   mobileLeftOpen: false,
-  mobileRightOpen: false
+  mobileRightOpen: false,
+  pointSortable: null
 };
 
 function createEmptyDraft() {
@@ -2786,27 +2788,27 @@ function renderRightPanel() {
 
     <section class="panel-block">
       <h3>点位顺序</h3>
-      <ul class="edit-points">
+      <ul class="edit-points" data-sortable="route-points">
         ${points
           .map((point, index) => {
-            const canDelete = index > 0 && index < points.length - 1;
             const nextPoint = points[index + 1];
             const insertLabel = nextPoint ? `在 ${point.name} 和 ${nextPoint.name} 间加入途经点` : "";
             const segmentMode = segments[index] || "driving";
             const transitTools = getTransitToolsForLeg(layer.route, index);
             return `
-              <li data-action="point-focus" data-index="${index}" class="point-focus-item" title="点击定位该点">
-                <div>
+              <li data-action="point-focus" data-index="${index}" data-point-index="${index}" class="point-focus-item" title="拖拽调整顺序，点击定位该点">
+                <div class="point-card-main">
                   <strong>${index + 1}. ${point.name}</strong>
+                  <button
+                    data-action="point-delete"
+                    data-index="${index}"
+                    class="icon-btn delete point-delete-btn"
+                    type="button"
+                    aria-label="删除点位"
+                    title="删除点位"
+                  >×</button>
                 </div>
-                <div class="point-edit-actions">
-                  <button data-action="point-up" data-index="${index}" class="btn tiny" type="button">上移</button>
-                  <button data-action="point-down" data-index="${index}" class="btn tiny" type="button">下移</button>
-                  ${
-                    canDelete
-                      ? `<button data-action="point-delete" data-index="${index}" class="btn tiny danger" type="button">删点</button>`
-                      : ""
-                  }
+                <div class="point-card-footer">
                   <button data-action="point-replace-map" data-index="${index}" class="btn tiny" type="button">地图替换</button>
                 </div>
               </li>
@@ -2847,6 +2849,63 @@ function renderRightPanel() {
       <button data-action="recalc-layer" class="btn primary full" type="button">应用修改并重算路线</button>
     </section>
   `;
+  initPointSortable();
+}
+
+function applyDraggedPointOrder(layer, orderedIndexes) {
+  if (!layer?.route || !Array.isArray(layer.route.points)) {
+    return;
+  }
+
+  const currentPoints = layer.route.points;
+  if (orderedIndexes.length !== currentPoints.length) {
+    return;
+  }
+
+  const nextPoints = orderedIndexes.map((index) => currentPoints[index]).filter(Boolean);
+  if (nextPoints.length !== currentPoints.length) {
+    return;
+  }
+
+  const changed = nextPoints.some((point, index) => point !== currentPoints[index]);
+  if (!changed) {
+    return;
+  }
+
+  pushEditHistory(layer);
+  layer.route.points = orderedIndexes.map((index) => currentPoints[index]);
+  syncLayerSegmentModes(layer);
+  persistLayersState();
+  renderRightPanel();
+  setToast("顺序已调整，点击下方按钮重算路线", "info");
+}
+
+function initPointSortable() {
+  if (state.pointSortable) {
+    state.pointSortable.destroy();
+    state.pointSortable = null;
+  }
+
+  const list = document.querySelector('[data-sortable="route-points"]');
+  if (!list) {
+    return;
+  }
+
+  state.pointSortable = Sortable.create(list, {
+    animation: 140,
+    draggable: ".point-focus-item",
+    filter: "button, select, input, textarea",
+    preventOnFilter: false,
+    ghostClass: "point-drag-ghost",
+    chosenClass: "point-drag-chosen",
+    onEnd: () => {
+      const layer = getSelectedLayer();
+      const orderedIndexes = [...list.querySelectorAll(".point-focus-item")]
+        .map((item) => Number(item.dataset.index))
+        .filter((index) => Number.isInteger(index));
+      applyDraggedPointOrder(layer, orderedIndexes);
+    }
+  });
 }
 
 function renderHistoryOverlay() {
@@ -3965,7 +4024,11 @@ function handleRightPanelAction(event) {
 
   if (action === "point-delete") {
     const index = Number(target.dataset.index);
-    if (index <= 0 || index >= layer.route.points.length - 1) {
+    if (index < 0 || index >= layer.route.points.length) {
+      return;
+    }
+    if (layer.route.points.length <= 2) {
+      setToast("路线至少保留两个地点", "warning");
       return;
     }
     pushEditHistory(layer);
@@ -4239,6 +4302,7 @@ function bindEvents() {
   const searchResults = document.getElementById("search-results");
   const historyBtn = document.getElementById("show-history-btn");
   const historyOverlay = document.getElementById("history-overlay");
+  const aiRouteNotice = document.getElementById("ai-route-notice");
   const leftMobileBtn = document.getElementById("toggle-left-btn");
   const rightMobileBtn = document.getElementById("toggle-right-btn");
 
@@ -4333,6 +4397,13 @@ function bindEvents() {
   });
 
   historyOverlay.addEventListener("click", handleHistoryAction);
+  aiRouteNotice?.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-action='close-ai-route-notice']");
+    if (!target || !aiRouteNotice.contains(target)) {
+      return;
+    }
+    clearAIRouteNotice();
+  });
 
   leftMobileBtn.addEventListener("click", () => {
     state.mobileLeftOpen = !state.mobileLeftOpen;

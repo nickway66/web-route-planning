@@ -690,13 +690,50 @@ label {
 }
 
 .edit-points li.point-focus-item {
-  cursor: pointer;
+  cursor: grab;
   transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.edit-points li.point-focus-item:active {
+  cursor: grabbing;
 }
 
 .edit-points li.point-focus-item:hover {
   border-color: rgba(55, 196, 255, 0.72);
   transform: translateY(-1px);
+}
+
+.point-card-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: start;
+  gap: 8px;
+}
+
+.point-card-main strong {
+  min-width: 0;
+  padding-right: 4px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.point-delete-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+}
+
+.point-delete-btn:hover {
+  background: rgba(255, 107, 107, 0.14);
+}
+
+.point-card-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .edit-points li.point-insert-row,
@@ -801,6 +838,14 @@ label {
   gap: 6px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.point-drag-chosen {
+  border-color: rgba(55, 196, 255, 0.7);
+}
+
+.point-drag-ghost {
+  opacity: 0.48;
 }
 
 .point-edit-actions label {

@@ -54,9 +54,45 @@ class FakeAIRouteClient:
 class FakeCostClient:
     def __init__(self, costs):
         self.costs = costs
+        self.calls = []
 
     async def estimate_driving_cost(self, from_point, to_point):
+        self.calls.append((from_point["name"], to_point["name"]))
         return self.costs[(from_point["name"], to_point["name"])]
+
+
+class RetryingAMapClient(AMapClient):
+    def __init__(self):
+        self.attempts = 0
+        self.sleeps = []
+
+    async def _request_json(self, path, params):
+        self.attempts += 1
+        if self.attempts < 3:
+            return {"status": "0", "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT"}
+        return {"status": "1", "result": "ok"}
+
+    async def _wait_for_rate_limit_slot(self):
+        return None
+
+    async def _sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+
+class ExhaustedQPSAMapClient(AMapClient):
+    def __init__(self):
+        self.attempts = 0
+        self.sleeps = []
+
+    async def _request_json(self, path, params):
+        self.attempts += 1
+        return {"status": "0", "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT"}
+
+    async def _wait_for_rate_limit_slot(self):
+        return None
+
+    async def _sleep(self, seconds):
+        self.sleeps.append(seconds)
 
 
 class FakeEntrancePOIClient:
@@ -113,6 +149,31 @@ def test_route_stats_sums_distance_and_duration():
             {"distance": "800", "duration": "300"},
         ]
     ) == {"distance": 2000.0, "duration": 900.0}
+
+
+def test_amap_get_retries_qps_limit_errors_with_backoff():
+    client = RetryingAMapClient()
+
+    data = asyncio.run(client._get("place/text", {"keywords": "A"}))
+
+    assert data == {"status": "1", "result": "ok"}
+    assert client.attempts == 3
+    assert client.sleeps == [1.0, 2.0]
+
+
+def test_amap_get_reports_qps_limit_as_user_readable_error_after_retries():
+    client = ExhaustedQPSAMapClient()
+
+    try:
+        asyncio.run(client._get("place/text", {"keywords": "A"}))
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("expected QPS exhaustion to raise")
+
+    assert message == "地图服务请求过于频繁，请稍后重试"
+    assert client.attempts == 4
+    assert client.sleeps == [1.0, 2.0, 4.0]
 
 
 def test_transit_route_splits_walking_access_from_public_transport():
@@ -323,6 +384,22 @@ def test_optimize_point_order_by_route_cost_falls_back_to_straight_line_order():
     ordered = asyncio.run(optimize_point_order_by_route_cost(BrokenCostClient(), points))
 
     assert [point["name"] for point in ordered] == ["A", "B", "C"]
+
+
+def test_optimize_point_order_by_route_cost_skips_cost_matrix_for_many_points():
+    points = [
+        {"name": "A", "lng": 0, "lat": 0},
+        {"name": "E", "lng": 20, "lat": 20},
+        {"name": "B", "lng": 1, "lat": 1},
+        {"name": "D", "lng": 10, "lat": 10},
+        {"name": "C", "lng": 2, "lat": 2},
+    ]
+    client = FakeCostClient({})
+
+    ordered = asyncio.run(optimize_point_order_by_route_cost(client, points))
+
+    assert [point["name"] for point in ordered] == ["A", "B", "C", "D", "E"]
+    assert client.calls == []
 
 
 def test_normalize_place_name_strips_numbering_and_transport_notes():

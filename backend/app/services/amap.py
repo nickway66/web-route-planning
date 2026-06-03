@@ -1,5 +1,6 @@
 import math
 import re
+import asyncio
 from typing import Any
 
 import httpx
@@ -21,6 +22,10 @@ SUBWAY_LINE_COLORS = [
 ]
 
 AMAP_DRIVING_WAYPOINT_LIMIT = 16
+AMAP_REQUEST_INTERVAL_SECONDS = 0.8
+AMAP_QPS_BACKOFF_SECONDS = [1.0, 2.0, 4.0]
+QPS_LIMIT_KEYWORDS = ("QPS_HAS_EXCEEDED_THE_LIMIT", "CUQPS_HAS_EXCEEDED_THE_LIMIT")
+QPS_LIMIT_USER_MESSAGE = "地图服务请求过于频繁，请稍后重试"
 
 
 def parse_polyline(polyline: str | None) -> list[list[float]]:
@@ -100,18 +105,55 @@ def normalize_poi(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class AMapClient:
+    _request_lock = asyncio.Lock()
+    _last_request_at = 0.0
+
     def __init__(self, key: str, base_url: str = "https://restapi.amap.com/v3"):
         if not key:
             raise ValueError("AMAP_WEB_SERVICE_KEY is not configured")
         self.key = key
         self.base_url = base_url.rstrip("/")
 
-    async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    async def _request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(f"{self.base_url}/{path.lstrip('/')}", params={**params, "key": self.key})
             response.raise_for_status()
-            data = response.json()
+            return response.json()
+
+    async def _wait_for_rate_limit_slot(self) -> None:
+        async with self._request_lock:
+            loop = asyncio.get_running_loop()
+            elapsed = loop.time() - self.__class__._last_request_at
+            wait_seconds = AMAP_REQUEST_INTERVAL_SECONDS - elapsed
+            if wait_seconds > 0:
+                await self._sleep(wait_seconds)
+            self.__class__._last_request_at = loop.time()
+
+    def _is_qps_limit_error(self, data: dict[str, Any]) -> bool:
+        info = str(data.get("info") or data.get("infocode") or "")
+        return any(keyword in info for keyword in QPS_LIMIT_KEYWORDS)
+
+    async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        attempts = len(AMAP_QPS_BACKOFF_SECONDS) + 1
+        last_data: dict[str, Any] | None = None
+
+        for attempt in range(attempts):
+            await self._wait_for_rate_limit_slot()
+            data = await self._request_json(path, params)
+            last_data = data
+            if str(data.get("status")) in {"1", "true", "True"}:
+                return data
+            if not self._is_qps_limit_error(data) or attempt >= len(AMAP_QPS_BACKOFF_SECONDS):
+                break
+            await self._sleep(AMAP_QPS_BACKOFF_SECONDS[attempt])
+
+        data = last_data or {}
         if str(data.get("status")) not in {"1", "true", "True"}:
+            if self._is_qps_limit_error(data):
+                raise RuntimeError(QPS_LIMIT_USER_MESSAGE)
             raise RuntimeError(data.get("info") or "AMap request failed")
         return data
 
