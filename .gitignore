@@ -31,6 +31,10 @@ Thumbs.db
 
 # cache and temp
 .cache/
+.pytest_cache/
+.vite-build-check/
+__pycache__/
+*.py[cod]
 .temp/
 tmp/
 *.tmp
