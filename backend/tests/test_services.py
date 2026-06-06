@@ -1,5 +1,6 @@
 import asyncio
 
+from backend.app.services.ai import parse_ai_envelope
 from backend.app.services.amap import AMapClient, normalize_poi, normalize_route_segments, parse_polyline, route_stats
 from backend.app.services.exports import create_gpx
 from backend.app.services.routes import build_ai_layers, normalize_place_name, optimize_point_order, optimize_point_order_by_route_cost
@@ -426,3 +427,48 @@ def test_create_gpx_contains_routes_tracks_and_points():
     assert "<name>第一天</name>" in gpx
     assert 'lat="30.1" lon="104.1"' in gpx
     assert 'lat="30.2" lon="104.2"' in gpx
+
+
+def test_parse_ai_envelope_keeps_plain_chat_out_of_route_flow():
+    result = parse_ai_envelope('{"type":"chat","reply":"I can use the current conversation context.","plan":null}')
+
+    assert result == {"type": "chat", "reply": "I can use the current conversation context.", "plan": None, "parsedPlan": None}
+
+
+def test_parse_ai_envelope_accepts_route_plan_with_two_places():
+    result = parse_ai_envelope(
+        '{"type":"route_plan","reply":"I prepared a Guangzhou route.","plan":{"city":"Guangzhou","days":[{"day":1,"places":[{"name":"Canton Tower"},{"name":"Guangdong Museum"}]}]}}'
+    )
+
+    assert result["type"] == "route_plan"
+    assert result["reply"] == "I prepared a Guangzhou route."
+    assert result["plan"]["city"] == "Guangzhou"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["Canton Tower", "Guangdong Museum"]
+    assert result["parsedPlan"] == result["plan"]
+
+
+def test_parse_ai_envelope_downgrades_invalid_route_plan_to_travel_advice():
+    result = parse_ai_envelope(
+        '{"type":"route_plan","reply":"Canton Tower is worth visiting.","plan":{"city":"Guangzhou","days":[{"day":1,"places":[{"name":"Canton Tower"}]}]}}'
+    )
+
+    assert result["type"] == "travel_advice"
+    assert result["plan"] is None
+    assert result["parsedPlan"] is None
+
+
+def test_parse_ai_envelope_accepts_legacy_route_json():
+    result = parse_ai_envelope(
+        '{"city":"Guangzhou","days":[{"day":1,"places":[{"name":"Canton Tower"},{"name":"Guangdong Museum"}]}]}'
+    )
+
+    assert result["type"] == "route_plan"
+    assert result["reply"]
+    assert not result["reply"].strip().startswith("{")
+    assert result["plan"]["city"] == "Guangzhou"
+
+
+def test_parse_ai_envelope_bad_json_falls_back_to_chat_text():
+    result = parse_ai_envelope("Plain answer, not JSON")
+
+    assert result == {"type": "chat", "reply": "Plain answer, not JSON", "plan": None, "parsedPlan": None}

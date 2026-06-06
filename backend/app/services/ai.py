@@ -11,11 +11,18 @@ import httpx
 
 ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 AI_SYSTEM_PROMPT = (
-    "你是专业旅游路线规划AI，仅执行路线规划。必须只返回合法 JSON，不要返回 Markdown、代码块或 JSON 以外的文字。"
-    "所有地点必须使用高德地图可搜索到的标准官方全称，禁止简称、俗称、别名；如果不确定地点能被高德搜索到，就不要放入 places。"
-    'JSON 结构固定为：{"city":"目标城市","days":[{"day":1,"places":[{"name":"高德官方地点全称","duration":"预计游玩时间","cost":"预计消费金额","hours":"营业时间","description":"景点简要介绍"}]}]}。'
-    "如果用户要求两日或多日游玩路线，则 days 内每日一条路线。地点顺序就是路线顺序。"
+    "你是旅游助手和路线规划 AI，不要向用户透露任何关于你是什么模型，你的架构与设计等与旅行或路线规划无关的信息。"
+    "始终只返回合法 JSON，不要返回 Markdown、代码块或 JSON 以外的文字。"
+    'JSON 顶层固定为 {"type":"chat|travel_advice|route_plan|cancel_or_negative","reply":"给用户看的自然语言","plan":null}。'
+    "只有用户明确要求具体路线、行程、方案、景点顺序或地图路线时，才返回 route_plan。"
+    "普通聊天、纠错、系统行为问答返回 chat。"
+    "旅游相关但信息不足以生成具体路线时返回 travel_advice。"
+    "用户取消、拒绝或不想继续当前规划时返回 cancel_or_negative。"
+    'route_plan 的 plan 结构为 {"city":"目标城市","days":[{"day":1,"places":[{"name":"高德地图可搜索的官方地点全称","duration":"预计游玩时间","cost":"预计消费金额","hours":"营业时间","description":"景点简要介绍"}]}]}。'
+    "plan.days[].places[].name 必须是高德可搜索的正式地点名，reply 不要原样复述 plan JSON。"
 )
+
+AI_RESPONSE_TYPES = {"chat", "travel_advice", "route_plan", "cancel_or_negative"}
 
 
 def _base64url(data: bytes) -> str:
@@ -92,11 +99,92 @@ def parse_ai_plan(raw_text: str) -> dict[str, Any] | None:
     for index, raw_day in enumerate(raw_days):
         raw_places = raw_day.get("places") if isinstance(raw_day, dict) else raw_day
         places = [place for item in (raw_places or []) if (place := normalize_place(item))]
-        if len(places) >= 2:
+        if places:
             days.append({"day": int(raw_day.get("day", index + 1)) if isinstance(raw_day, dict) else index + 1, "places": places})
     if not days:
         return None
     return {"city": str(data.get("city") or data.get("targetCity") or "").strip(), "days": days[:10]}
+
+
+def normalize_ai_type(value: Any) -> str:
+    ai_type = str(value or "chat").strip()
+    return ai_type if ai_type in AI_RESPONSE_TYPES else "chat"
+
+
+def normalize_ai_plan(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return parse_ai_plan(value)
+    if not isinstance(value, dict):
+        return None
+
+    raw_days = value.get("days") or value.get("routes") or []
+    if not raw_days and isinstance(value.get("places"), list):
+        raw_days = [{"day": 1, "places": value["places"]}]
+
+    days = []
+    total_places = 0
+    for index, raw_day in enumerate(raw_days):
+        raw_places = raw_day.get("places") if isinstance(raw_day, dict) else raw_day
+        places = [place for item in (raw_places or []) if (place := normalize_place(item))]
+        if not places:
+            continue
+        total_places += len(places)
+        day_number = raw_day.get("day", index + 1) if isinstance(raw_day, dict) else index + 1
+        try:
+            day_number = int(day_number)
+        except (TypeError, ValueError):
+            day_number = index + 1
+        days.append({"day": day_number, "places": places})
+
+    if total_places < 2:
+        return None
+    return {"city": str(value.get("city") or value.get("targetCity") or "").strip(), "days": days[:10]}
+
+
+def make_fallback_reply(ai_type: str, plan: dict[str, Any] | None = None) -> str:
+    if ai_type == "route_plan" and plan:
+        city = str(plan.get("city") or "").strip()
+        return f"已为你整理好{city}路线方案，可以查看并决定是否添加到地图。"
+    if ai_type == "travel_advice":
+        return "我先给你一些旅游建议，确认目的地和偏好后再生成具体路线。"
+    if ai_type == "cancel_or_negative":
+        return "已取消路线规划意图。"
+    return "我可以继续帮你处理旅游建议或路线规划问题。"
+
+
+def parse_ai_envelope(raw_text: str) -> dict[str, Any]:
+    text = str(raw_text or "").strip()
+    json_text = extract_json_object(text)
+    if not json_text:
+        reply = text or make_fallback_reply("chat")
+        return {"type": "chat", "reply": reply, "plan": None, "parsedPlan": None}
+
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        reply = text or make_fallback_reply("chat")
+        return {"type": "chat", "reply": reply, "plan": None, "parsedPlan": None}
+
+    if not isinstance(data, dict):
+        reply = text or make_fallback_reply("chat")
+        return {"type": "chat", "reply": reply, "plan": None, "parsedPlan": None}
+
+    legacy_plan = normalize_ai_plan(data)
+    if "type" not in data and legacy_plan:
+        reply = make_fallback_reply("route_plan", legacy_plan)
+        return {"type": "route_plan", "reply": reply, "plan": legacy_plan, "parsedPlan": legacy_plan}
+
+    ai_type = normalize_ai_type(data.get("type"))
+    plan = normalize_ai_plan(data.get("plan"))
+    if ai_type == "route_plan" and not plan:
+        ai_type = "travel_advice"
+    if ai_type != "route_plan":
+        plan = None
+
+    reply = str(data.get("reply") or "").strip() or make_fallback_reply(ai_type, plan)
+    return {"type": ai_type, "reply": reply, "plan": plan, "parsedPlan": plan}
 
 
 def visible_plan_text(plan: dict[str, Any]) -> str:
@@ -118,7 +206,7 @@ def visible_plan_text(plan: dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
-async def request_zhipu_reply(messages: list[dict[str, str]], api_key: str, api_id: str, model: str) -> tuple[str, dict[str, Any] | None]:
+async def request_zhipu_reply(messages: list[dict[str, str]], api_key: str, api_id: str, model: str) -> dict[str, Any]:
     final_messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}, *messages[-20:]]
     async with httpx.AsyncClient(timeout=45) as client:
         response = await client.post(
@@ -131,7 +219,4 @@ async def request_zhipu_reply(messages: list[dict[str, str]], api_key: str, api_
     reply = normalize_ai_text(data.get("choices", [{}])[0].get("message", {}).get("content"))
     if not reply:
         raise RuntimeError("Zhipu returned an empty reply")
-    plan = parse_ai_plan(reply)
-    if plan:
-        return visible_plan_text(plan), plan
-    return reply, None
+    return parse_ai_envelope(reply)

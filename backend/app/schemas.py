@@ -13,7 +13,9 @@ class AIChatRequest(BaseModel):
 
 
 class AIChatResponse(BaseModel):
+    type: Literal["chat", "travel_advice", "route_plan", "cancel_or_negative"]
     reply: str
+    plan: dict[str, Any] | None = None
     parsedPlan: dict[str, Any] | None = None
 
 

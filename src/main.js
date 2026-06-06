@@ -37,11 +37,7 @@ const TRAVEL_MODES = [
 
 const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
 const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
-const ZHIPU_CHAT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 const CANVAS_COLOR_FALLBACK = "rgba(7, 18, 36, 0.92)";
-const AI_SYSTEM_PROMPT =
-  '你是专业旅游路线规划AI，仅执行路线规划。必须只返回合法 JSON，不要返回 Markdown、代码块或 JSON 以外的文字。所有地点必须使用高德地图可搜索到的标准官方全称，禁止简称、俗称、别名；如果不确定地点能被高德搜索到，就不要放入 places。JSON 结构固定为：{"city":"目标城市","days":[{"day":1,"places":[{"name":"高德官方地点全称","duration":"预估游玩时间","cost":"预估消费金额","hours":"营业时间","description":"景点简要介绍"}]}]}。如果用户要求两日或多日游玩路线，则 days 内每日一条路线。地点顺序就是路线顺序。';
-
 const app = document.getElementById("app");
 
 const CN_DAY_NUMBER_MAP = {
@@ -210,30 +206,6 @@ function createImagePdfBlob(jpegDataUrl, width, height) {
   ].join("\n");
   chunks.push(encoder.encode(xref));
   return new Blob([concatUint8Arrays(chunks)], { type: "application/pdf" });
-}
-
-function normalizeAIText(content) {
-  if (typeof content === "string") {
-    return content.trim();
-  }
-
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") {
-          return item;
-        }
-        return item?.text || item?.content || "";
-      })
-      .join("")
-      .trim();
-  }
-
-  if (content && typeof content === "object") {
-    return String(content?.text || content?.content || "").trim();
-  }
-
-  return "";
 }
 
 function extractJsonObjectText(rawText = "") {
@@ -775,92 +747,6 @@ async function inferAIRouteCity(placeNames = [], textContext = "") {
   return cityFromText || bestCity;
 }
 
-function encodeBase64UrlFromBytes(bytes) {
-  let binary = "";
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function encodeBase64UrlFromJson(value) {
-  const encoded = new TextEncoder().encode(JSON.stringify(value));
-  return encodeBase64UrlFromBytes(encoded);
-}
-
-function resolveZhipuModel() {
-  if (ZHIPU_MODEL) {
-    return ZHIPU_MODEL;
-  }
-  if (ZHIPU_API_ID && ZHIPU_API_ID.startsWith("glm-")) {
-    return ZHIPU_API_ID;
-  }
-  return "glm-4-flash";
-}
-
-function resolveZhipuCredentials() {
-  const rawKey = ZHIPU_API_KEY;
-  const rawId = ZHIPU_API_ID;
-
-  if (!rawKey) {
-    throw new Error("尚未配置智谱API，请在 .env 中填写 VITE_ZHIPU_API_KEY");
-  }
-
-  if (rawKey.includes(".")) {
-    const [keyId, keySecret] = rawKey.split(".", 2);
-    if (keyId && keySecret) {
-      return { keyId, keySecret };
-    }
-  }
-
-  if (!rawId || rawId.startsWith("glm-")) {
-    throw new Error("智谱鉴权信息不完整：请使用 id.secret 形式的 VITE_ZHIPU_API_KEY，或填写 VITE_ZHIPU_API_ID + VITE_ZHIPU_API_KEY");
-  }
-
-  return {
-    keyId: rawId,
-    keySecret: rawKey
-  };
-}
-
-async function buildZhipuAuthorizationHeader() {
-  const { keyId, keySecret } = resolveZhipuCredentials();
-  const now = Math.floor(Date.now() / 1000);
-  const header = {
-    alg: "HS256",
-    sign_type: "SIGN"
-  };
-  const payload = {
-    api_key: keyId,
-    exp: now + 300,
-    timestamp: now
-  };
-
-  const headerPart = encodeBase64UrlFromJson(header);
-  const payloadPart = encodeBase64UrlFromJson(payload);
-  const signingInput = `${headerPart}.${payloadPart}`;
-
-  if (!window.crypto?.subtle) {
-    return `Bearer ${keyId}.${keySecret}`;
-  }
-
-  const cryptoKey = await window.crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(keySecret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signatureBuffer = await window.crypto.subtle.sign(
-    "HMAC",
-    cryptoKey,
-    new TextEncoder().encode(signingInput)
-  );
-  const signaturePart = encodeBase64UrlFromBytes(new Uint8Array(signatureBuffer));
-
-  return `Bearer ${signingInput}.${signaturePart}`;
-}
-
 const state = {
   mapService: null,
   mapReady: false,
@@ -895,7 +781,8 @@ const state = {
   toastTimer: null,
   mobileLeftOpen: false,
   mobileRightOpen: false,
-  pointSortable: null
+  pointSortable: null,
+  pendingPointOrders: {}
 };
 
 function createEmptyDraft() {
@@ -1481,6 +1368,23 @@ function pushAIChatMessage(role, content, extras = {}) {
   saveAIChatMessages(state.aiChatMessages);
 }
 
+function clearPendingAIRouteActions() {
+  let changed = false;
+  state.aiChatMessages.forEach((message) => {
+    if (message?.role !== "assistant" || !["pending", "failed"].includes(message.routeActionStatus)) {
+      return;
+    }
+    message.routeActionStatus = "rejected";
+    message.routeActionError = "";
+    message.content = stripAIRouteActionTail(message.content);
+    changed = true;
+  });
+  if (changed) {
+    clearAIRouteNotice();
+    saveAIChatMessages(state.aiChatMessages);
+  }
+}
+
 function refreshAIConversations() {
   return listAIConversations()
     .then((conversations) => {
@@ -1508,42 +1412,6 @@ function getEditorOverlayOpenState() {
   return editorOpen || state.aiChatOpen;
 }
 
-async function requestZhipuReply(messages = []) {
-  const authorization = await buildZhipuAuthorizationHeader();
-  const model = resolveZhipuModel();
-
-  const payloadMessages = messages
-    .filter((item) => item && (item.role === "user" || item.role === "assistant") && typeof item.content === "string")
-    .slice(-20)
-    .map((item) => ({ role: item.role, content: item.content }));
-
-  const finalMessages = [{ role: "system", content: AI_SYSTEM_PROMPT }, ...payloadMessages];
-
-  const response = await fetch(ZHIPU_CHAT_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: authorization
-    },
-    body: JSON.stringify({
-      model,
-      messages: finalMessages
-    })
-  });
-
-  if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`智谱请求失败（${response.status}）：${details.slice(0, 160)}`);
-  }
-
-  const data = await response.json();
-  const reply = normalizeAIText(data?.choices?.[0]?.message?.content);
-  if (!reply) {
-    throw new Error("智谱未返回有效回答");
-  }
-  return reply;
-}
-
 async function submitAIChat() {
   if (state.aiChatPending) {
     return;
@@ -1563,12 +1431,16 @@ async function submitAIChat() {
   try {
     const response = await chatWithAI(state.aiChatMessages);
     const answer = response.reply || "";
-    const plan = response.parsedPlan || null;
-    const dayPlans = Array.isArray(plan?.days)
-      ? plan.days.map((day) => (Array.isArray(day?.places) ? day.places.map((place) => place.name).filter(Boolean) : []))
-      : [];
-    const places = dayPlans.flat();
-    if (places.length >= 2) {
+    const plan = response.plan || null;
+    if (response.type === "route_plan" && plan) {
+      const dayPlans = Array.isArray(plan.days)
+        ? plan.days.map((day) => (Array.isArray(day?.places) ? day.places.map((place) => place.name).filter(Boolean) : []))
+        : [];
+      const places = dayPlans.flat();
+      if (places.length < 2) {
+        pushAIChatMessage("assistant", answer);
+        return;
+      }
       const assistantContent = answer;
       pushAIChatMessage("assistant", assistantContent, {
         routePlaces: places,
@@ -1576,6 +1448,9 @@ async function submitAIChat() {
         routeTargetCity: plan?.city || "",
         routeActionStatus: "pending"
       });
+    } else if (response.type === "cancel_or_negative") {
+      clearPendingAIRouteActions();
+      pushAIChatMessage("assistant", answer);
     } else {
       pushAIChatMessage("assistant", answer);
     }
@@ -2404,6 +2279,59 @@ function syncLayerSegmentModes(layer) {
   layer.route.segmentModes = current;
 }
 
+function getRouteEditKey(route) {
+  return route?.id || "";
+}
+
+function getPendingPointOrder(route) {
+  const key = getRouteEditKey(route);
+  const order = key ? state.pendingPointOrders[key] : null;
+  const points = route?.points || [];
+  if (!Array.isArray(order) || order.length !== points.length) {
+    return null;
+  }
+  const seen = new Set(order);
+  if (seen.size !== points.length || order.some((index) => !Number.isInteger(index) || index < 0 || index >= points.length)) {
+    return null;
+  }
+  return order;
+}
+
+function getRouteEditorPointEntries(route) {
+  const points = route?.points || [];
+  const order = getPendingPointOrder(route) || points.map((_, index) => index);
+  return order.map((sourceIndex) => ({ point: points[sourceIndex], sourceIndex })).filter((entry) => entry.point);
+}
+
+function setPendingPointOrder(route, order) {
+  const key = getRouteEditKey(route);
+  if (!key) {
+    return;
+  }
+  state.pendingPointOrders[key] = order;
+}
+
+function clearPendingPointOrder(route) {
+  const key = getRouteEditKey(route);
+  if (key) {
+    delete state.pendingPointOrders[key];
+  }
+}
+
+function clearPendingPointOrders() {
+  state.pendingPointOrders = {};
+}
+
+function applyPendingPointOrder(route) {
+  const order = getPendingPointOrder(route);
+  if (!order) {
+    return false;
+  }
+  route.points = order.map((index) => route.points[index]);
+  clearPendingPointOrder(route);
+  return true;
+}
+
 function isMapReady() {
   return Boolean(state.mapReady && state.mapService);
 }
@@ -2729,7 +2657,8 @@ function renderRightPanel() {
     return;
   }
 
-  const points = layer.route.points || [];
+  const pointEntries = getRouteEditorPointEntries(layer.route);
+  const points = pointEntries.map((entry) => entry.point);
   syncLayerSegmentModes(layer);
   const segments = layer.route.segmentModes || [];
   ensureEditHistory(layer.id);
@@ -2791,14 +2720,16 @@ function renderRightPanel() {
       <ul class="edit-points" data-sortable="route-points">
         ${points
           .map((point, index) => {
+            const sourceIndex = pointEntries[index]?.sourceIndex ?? index;
             const nextPoint = points[index + 1];
             const insertLabel = nextPoint ? `在 ${point.name} 和 ${nextPoint.name} 间加入途经点` : "";
             const segmentMode = segments[index] || "driving";
             const transitTools = getTransitToolsForLeg(layer.route, index);
             return `
-              <li data-action="point-focus" data-index="${index}" data-point-index="${index}" class="point-focus-item" title="拖拽调整顺序，点击定位该点">
+              <li data-action="point-focus" data-index="${sourceIndex}" data-point-index="${sourceIndex}" class="point-focus-item" title="拖拽调整顺序，点击定位该点">
                 <div class="point-card-main">
                   <strong>${index + 1}. ${point.name}</strong>
+                  <button data-action="point-replace-map" data-index="${sourceIndex}" class="btn tiny point-replace-inline" type="button">地图替换</button>
                   <button
                     data-action="point-delete"
                     data-index="${index}"
@@ -2809,7 +2740,7 @@ function renderRightPanel() {
                   >×</button>
                 </div>
                 <div class="point-card-footer">
-                  <button data-action="point-replace-map" data-index="${index}" class="btn tiny" type="button">地图替换</button>
+                  <button data-action="point-replace-map" data-index="${sourceIndex}" class="btn tiny" type="button">地图替换</button>
                 </div>
               </li>
               ${
@@ -2872,10 +2803,7 @@ function applyDraggedPointOrder(layer, orderedIndexes) {
     return;
   }
 
-  pushEditHistory(layer);
-  layer.route.points = orderedIndexes.map((index) => currentPoints[index]);
-  syncLayerSegmentModes(layer);
-  persistLayersState();
+  setPendingPointOrder(layer.route, orderedIndexes);
   renderRightPanel();
   setToast("顺序已调整，点击下方按钮重算路线", "info");
 }
@@ -3200,7 +3128,7 @@ async function recalcSelectedLayer() {
     return;
   }
 
-  const points = layer.route.points || [];
+  let points = layer.route.points || [];
   if (points.length < 2) {
     setToast("点位不足，无法重算路线", "warning");
     return;
@@ -3210,6 +3138,9 @@ async function recalcSelectedLayer() {
 
   try {
     pushEditHistory(layer);
+    applyPendingPointOrder(layer.route);
+    points = layer.route.points || [];
+    syncLayerSegmentModes(layer);
     setToast("正在重算当前图层路线...");
     let transitCity = normalizeTransitCity(state.draft.transitCity) || "成都";
     if (hasTransitMode(layer.route.segmentModes || [])) {
@@ -3746,6 +3677,7 @@ function handleLeftPanelAction(event) {
 
   if (action === "layer-select") {
     closeAIChatForRouteEdit();
+    clearPendingPointOrders();
     const nextId = target.dataset.layerId;
     state.selectedLayerId = nextId;
     state.editorVisible = true;
@@ -3819,6 +3751,7 @@ function handleRightPanelAction(event) {
   const { action } = target.dataset;
 
   if (action === "close-new-route-editor" || action === "close-editor") {
+    clearPendingPointOrders();
     state.newRouteEditorOpen = false;
     state.editorVisible = false;
     state.mobileRightOpen = false;
@@ -3905,6 +3838,7 @@ function handleRightPanelAction(event) {
 
   if (action === "route-select") {
     closeAIChatForRouteEdit();
+    clearPendingPointOrders();
     layer.selectedRouteId = target.dataset.routeId;
     state.editorVisible = true;
     state.newRouteEditorOpen = false;
@@ -3938,6 +3872,7 @@ function handleRightPanelAction(event) {
     if (!ok) {
       return;
     }
+    clearPendingPointOrder(route);
     layer.routes = (layer.routes || []).filter((item) => item.id !== routeId);
     if (layer.selectedRouteId === routeId) {
       layer.selectedRouteId = layer.routes[0]?.id || null;
@@ -4032,6 +3967,7 @@ function handleRightPanelAction(event) {
       return;
     }
     pushEditHistory(layer);
+    clearPendingPointOrder(layer.route);
     layer.route.points.splice(index, 1);
     syncLayerSegmentModes(layer);
     persistLayersState();
@@ -4045,6 +3981,7 @@ function handleRightPanelAction(event) {
   }
 
   if (action === "insert-between-map") {
+    clearPendingPointOrder(layer.route);
     setPickMode({ type: "insert-layer-point", index: Number(target.dataset.index), label: "插入途经点" });
     return;
   }

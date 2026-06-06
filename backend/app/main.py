@@ -35,13 +35,12 @@ async def health() -> dict[str, str]:
 @app.post("/api/ai/chat", response_model=AIChatResponse)
 async def ai_chat(payload: AIChatRequest) -> dict:
     try:
-        reply, parsed_plan = await request_zhipu_reply(
+        return await request_zhipu_reply(
             [message.model_dump() for message in payload.messages],
             settings.zhipu_api_key,
             settings.zhipu_api_id,
             settings.zhipu_model,
         )
-        return {"reply": reply, "parsedPlan": parsed_plan}
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
