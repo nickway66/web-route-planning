@@ -76,6 +76,17 @@ function loadAIChatMessages() {
     }
     return parsed
       .filter((item) => item && (item.role === "user" || item.role === "assistant") && typeof item.content === "string")
+      .map((item) => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+        createdAt: item.createdAt,
+        routePlaces: Array.isArray(item.routePlaces) ? item.routePlaces : undefined,
+        routeDayPlans: Array.isArray(item.routeDayPlans) ? item.routeDayPlans : undefined,
+        routeTargetCity: item.routeTargetCity,
+        routeActionStatus: item.routeActionStatus,
+        routeActionError: item.routeActionError
+      }))
       .slice(-80);
   } catch (error) {
     return [];
@@ -221,6 +232,154 @@ function extractJsonObjectText(rawText = "") {
   return start >= 0 && end > start ? text.slice(start, end + 1) : "";
 }
 
+function stripMarkdownJsonFence(rawText = "") {
+  return String(rawText || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function looksLikeAIEnvelope(value) {
+  return isPlainObject(value) && (
+    typeof value.reply === "string" ||
+    value.plan ||
+    typeof value.type === "string" ||
+    Array.isArray(value.days) ||
+    Array.isArray(value.routes) ||
+    Array.isArray(value.places)
+  );
+}
+
+function extractBalancedJsonSegments(rawText = "") {
+  const text = String(rawText || "");
+  const results = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        results.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  if (start >= 0 && depth > 0) {
+    results.push(text.slice(start));
+  }
+
+  return results;
+}
+
+function tryParseJsonCandidate(candidate = "") {
+  const text = stripMarkdownJsonFence(candidate);
+  if (!text) {
+    return null;
+  }
+
+  const attempts = [text];
+  const objectText = extractJsonObjectText(text);
+  if (objectText && objectText !== text) {
+    attempts.push(objectText);
+  }
+
+  for (const item of attempts) {
+    try {
+      return JSON.parse(item);
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractAIEnvelope(rawValue) {
+  if (looksLikeAIEnvelope(rawValue)) {
+    return rawValue;
+  }
+
+  const text = typeof rawValue === "string"
+    ? rawValue
+    : typeof rawValue?.reply === "string"
+      ? rawValue.reply
+      : "";
+  if (!text) {
+    return null;
+  }
+
+  const candidates = [];
+  const trimmed = text.trim();
+  if (trimmed) {
+    candidates.push(trimmed);
+    const stripped = stripMarkdownJsonFence(trimmed);
+    if (stripped && stripped !== trimmed) {
+      candidates.push(stripped);
+    }
+  }
+
+  const fencedMatches = text.match(/```(?:json)?\s*[\s\S]*?(?:```|$)/gi) || [];
+  fencedMatches.forEach((match) => candidates.push(match));
+  extractBalancedJsonSegments(text).forEach((segment) => candidates.push(segment));
+  if (typeof rawValue?.reply === "string" && rawValue.reply !== text) {
+    candidates.push(rawValue.reply);
+  }
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJsonCandidate(candidate);
+    if (!parsed) {
+      continue;
+    }
+    if (looksLikeAIEnvelope(parsed)) {
+      return parsed;
+    }
+    if (typeof parsed?.reply === "string") {
+      const nested = extractAIEnvelope(parsed.reply);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+}
+
 function normalizeAIJsonPlace(place) {
   if (typeof place === "string") {
     const name = normalizeAIRoutePlaceName(place);
@@ -242,44 +401,61 @@ function normalizeAIJsonPlace(place) {
   };
 }
 
-function parseAIJsonPlan(rawText = "") {
-  const jsonText = extractJsonObjectText(rawText);
-  if (!jsonText) {
+function normalizeAIPlan(planLike) {
+  const source = looksLikeAIEnvelope(planLike) && planLike.plan ? planLike.plan : planLike;
+  if (!source || typeof source !== "object") {
     return null;
   }
 
-  try {
-    const data = JSON.parse(jsonText);
-    const rawDays = Array.isArray(data.days)
-      ? data.days
-      : Array.isArray(data.routes)
-        ? data.routes
-        : Array.isArray(data.places)
-          ? [{ day: 1, places: data.places }]
+  const rawDays = Array.isArray(source.days)
+    ? source.days
+    : Array.isArray(source.routes)
+      ? source.routes
+      : Array.isArray(source.itinerary)
+        ? source.itinerary
+        : Array.isArray(source.places)
+          ? [{ day: 1, places: source.places }]
           : [];
-    const days = rawDays
-      .map((day, index) => {
-        const rawPlaces = Array.isArray(day?.places) ? day.places : Array.isArray(day) ? day : [];
-        const places = rawPlaces.map(normalizeAIJsonPlace).filter(Boolean);
-        return {
-          day: Number(day?.day || index + 1),
-          places
-        };
-      })
-      .filter((day) => day.places.length >= 2)
-      .slice(0, 10);
+  const days = rawDays
+    .map((day, index) => {
+      const rawPlaces = Array.isArray(day?.places)
+        ? day.places
+        : Array.isArray(day?.items)
+          ? day.items
+          : Array.isArray(day)
+            ? day
+            : [];
+      const places = rawPlaces.map(normalizeAIJsonPlace).filter(Boolean);
+      return {
+        day: Number(day?.day || day?.index || index + 1),
+        places
+      };
+    })
+    .filter((day) => day.places.length)
+    .slice(0, 10);
 
-    if (!days.length) {
-      return null;
-    }
-
-    return {
-      city: normalizeTransitCity(data.city || data.targetCity || ""),
-      days
-    };
-  } catch (error) {
+  if (!days.length) {
     return null;
   }
+
+  return {
+    city: normalizeTransitCity(source.city || source.targetCity || source.destination || ""),
+    days
+  };
+}
+
+function parseAIJsonPlan(rawText = "") {
+  const envelope = extractAIEnvelope(rawText);
+  if (envelope?.plan) {
+    return normalizeAIPlan(envelope.plan);
+  }
+
+  const parsed = tryParseJsonCandidate(rawText);
+  if (parsed) {
+    return normalizeAIPlan(parsed);
+  }
+
+  return normalizeAIPlan(envelope);
 }
 
 function formatAIJsonVisibleText(plan) {
@@ -445,6 +621,226 @@ function parseAIPlannedPlaces(rawText = "") {
   };
 }
 
+function buildNaturalLanguagePlanReply(plan) {
+  if (!plan?.days?.length) {
+    return "";
+  }
+
+  const title = plan.city ? `为您规划了一条${plan.city}路线：` : "已整理行程建议：";
+  const sections = plan.days
+    .map((day, dayIndex) => {
+      const places = Array.isArray(day?.places) ? day.places.filter((place) => place?.name) : [];
+      if (!places.length) {
+        return "";
+      }
+
+      const placeLines = places.map((place, placeIndex) => {
+        const lines = [`${placeIndex + 1}. ${place.name}`];
+        if (place.duration) {
+          lines.push(`   游玩时长：${place.duration}`);
+        }
+        if (place.cost) {
+          lines.push(`   费用：${place.cost}`);
+        }
+        if (place.hours) {
+          lines.push(`   营业时间：${place.hours}`);
+        }
+        if (place.description) {
+          lines.push(`   简介：${place.description}`);
+        }
+        return lines.join("\n");
+      });
+
+      return [`第${day.day || dayIndex + 1}天：`, ...placeLines].join("\n");
+    })
+    .filter(Boolean);
+
+  return [title, ...sections].join("\n\n");
+}
+
+function getPlanPlaceNames(plan) {
+  return (plan?.days || [])
+    .flatMap((day) => (Array.isArray(day?.places) ? day.places : []))
+    .map((place) => normalizeAIRoutePlaceName(place?.name || ""))
+    .filter(Boolean);
+}
+
+function replyMentionsPlanPlace(reply = "", plan = null) {
+  const compareReply = normalizePlaceForCompare(reply);
+  if (!compareReply) {
+    return false;
+  }
+
+  return getPlanPlaceNames(plan).some((name) => compareReply.includes(normalizePlaceForCompare(name)));
+}
+
+function ensureRoutePlanReplyDetails(reply = "", plan = null) {
+  const planReply = buildNaturalLanguagePlanReply(plan);
+  const cleanedReply = String(reply || "").trim();
+  if (!planReply) {
+    return cleanedReply;
+  }
+  if (!cleanedReply) {
+    return planReply;
+  }
+
+  const hasPlaceMention = replyMentionsPlanPlace(cleanedReply, plan);
+  const hasDetailLabels = /(?:游玩时长|费用|营业时间|简介)：/.test(cleanedReply);
+  if (cleanedReply.length < 24 || !hasPlaceMention) {
+    return planReply;
+  }
+  if (!hasDetailLabels) {
+    return `${cleanedReply}\n\n${planReply}`;
+  }
+  return cleanedReply;
+}
+
+function looksLikeJsonEnvelopeText(rawText = "") {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return false;
+  }
+  if (/^```(?:json)?/i.test(text)) {
+    return true;
+  }
+  const envelope = extractAIEnvelope(text);
+  return Boolean(envelope && typeof envelope === "object");
+}
+
+function sanitizeAssistantReply(rawReply = "", plan = null, type = "") {
+  const reply = String(rawReply || "").trim();
+  const envelope = extractAIEnvelope(reply);
+  if (envelope && envelope !== rawReply) {
+    const nestedPlan = normalizeAIPlan(envelope.plan || envelope) || plan;
+    const nestedReply = typeof envelope.reply === "string" ? sanitizeAssistantReply(envelope.reply, nestedPlan, envelope.type || type) : "";
+    if (nestedReply) {
+      return nestedReply;
+    }
+    if (nestedPlan) {
+      return buildNaturalLanguagePlanReply(nestedPlan);
+    }
+  }
+
+  if (!reply || looksLikeJsonEnvelopeText(reply)) {
+    if (plan) {
+      return buildNaturalLanguagePlanReply(plan);
+    }
+    if (type === "cancel_or_negative") {
+      return "已取消这次路线添加。";
+    }
+    return "已收到回复。";
+  }
+
+  return reply.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim() || buildNaturalLanguagePlanReply(plan) || "已收到回复。";
+}
+
+function deriveRouteMetadataFromPlan(plan) {
+  const normalizedPlan = normalizeAIPlan(plan);
+  if (!normalizedPlan) {
+    return {
+      routePlaces: [],
+      routeDayPlans: [],
+      routeTargetCity: "",
+      routeActionStatus: ""
+    };
+  }
+
+  const routeDayPlans = normalizedPlan.days
+    .map((day) => day.places.map((place) => normalizeAIRoutePlaceName(place.name)).filter(Boolean))
+    .filter((places) => places.length >= 2);
+  const routePlaces = routeDayPlans.flat();
+
+  return {
+    routePlaces,
+    routeDayPlans,
+    routeTargetCity: normalizedPlan.city || "",
+    routeActionStatus: routePlaces.length >= 2 ? "pending" : ""
+  };
+}
+
+function normalizeAIChatResponse(response) {
+  const envelope = extractAIEnvelope(response) || (isPlainObject(response) ? response : null);
+  const plan = normalizeAIPlan(envelope?.plan || envelope);
+  const type = String(envelope?.type || (plan ? "route_plan" : "reply") || "reply").trim() || "reply";
+  const replySource = typeof envelope?.reply === "string"
+    ? envelope.reply
+    : typeof response === "string"
+      ? response
+      : typeof response?.reply === "string"
+        ? response.reply
+        : "";
+  const reply = type === "route_plan" && plan
+    ? ensureRoutePlanReplyDetails(sanitizeAssistantReply(replySource, plan, type), plan)
+    : sanitizeAssistantReply(replySource, plan, type);
+
+  return {
+    type,
+    reply,
+    plan
+  };
+}
+
+function normalizeAIChatMessage(message = {}) {
+  if (!message || (message.role !== "user" && message.role !== "assistant")) {
+    return { normalized: message, changed: false };
+  }
+
+  if (message.role === "user") {
+    const content = String(message.content || "");
+    const normalized = content === message.content ? message : { ...message, content };
+    return { normalized, changed: normalized !== message };
+  }
+
+  const normalizedResponse = normalizeAIChatResponse(message.content || "");
+  const derivedFromPlan = deriveRouteMetadataFromPlan(normalizedResponse.plan);
+  const existingDayPlans = Array.isArray(message.routeDayPlans) ? message.routeDayPlans : [];
+  const existingPlaces = Array.isArray(message.routePlaces) ? message.routePlaces : [];
+  const routeDayPlans = derivedFromPlan.routeDayPlans.length ? derivedFromPlan.routeDayPlans : existingDayPlans;
+  const routePlaces = derivedFromPlan.routePlaces.length ? derivedFromPlan.routePlaces : existingPlaces;
+  const routeTargetCity = derivedFromPlan.routeTargetCity || String(message.routeTargetCity || "").trim();
+  const routeActionStatus = routePlaces.length >= 2
+    ? (message.routeActionStatus || derivedFromPlan.routeActionStatus || "pending")
+    : (message.routeActionStatus || "");
+
+  const normalized = {
+    ...message,
+    content: normalizedResponse.reply,
+    routePlaces,
+    routeDayPlans,
+    routeTargetCity,
+    routeActionStatus
+  };
+  const changed = JSON.stringify({
+    content: message.content,
+    routePlaces: existingPlaces,
+    routeDayPlans: existingDayPlans,
+    routeTargetCity: message.routeTargetCity || "",
+    routeActionStatus: message.routeActionStatus || ""
+  }) !== JSON.stringify({
+    content: normalized.content,
+    routePlaces: normalized.routePlaces,
+    routeDayPlans: normalized.routeDayPlans,
+    routeTargetCity: normalized.routeTargetCity,
+    routeActionStatus: normalized.routeActionStatus
+  });
+
+  return { normalized, changed };
+}
+
+function normalizeAIChatMessages(messages = []) {
+  let changed = false;
+  const normalized = (Array.isArray(messages) ? messages : [])
+    .filter((message) => message && (message.role === "user" || message.role === "assistant"))
+    .map((message) => {
+      const result = normalizeAIChatMessage(message);
+      changed = changed || result.changed;
+      return result.normalized;
+    })
+    .slice(-80);
+
+  return { messages: normalized, changed };
+}
+
 function getAIRouteActionLabel(status = "pending") {
   if (status === "accepted") {
     return "已添加到地图";
@@ -471,6 +867,10 @@ function stripAIRouteActionTail(content = "") {
   ];
   const pattern = new RegExp(`\\n\\n(?:${labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?:[（(][\\s\\S]*[）)])?\\s*$`);
   return String(content || "").replace(pattern, "").trim();
+}
+
+function formatMultilineTextHtml(text = "") {
+  return escapeHtml(text).replace(/\r?\n/g, "<br>");
 }
 
 function normalizeAIRoutePlaceName(name = "") {
@@ -1351,16 +1751,19 @@ function hideFloatingTooltip() {
 }
 
 function pushAIChatMessage(role, content, extras = {}) {
-  const text = String(content || "").trim();
+  const normalizedInput = role === "assistant"
+    ? normalizeAIChatMessage({ role, content, ...extras }).normalized
+    : { role, content: String(content || "").trim(), ...extras };
+  const text = String(normalizedInput.content || "").trim();
   if (!text) {
     return;
   }
   state.aiChatMessages.push({
     id: createId("chat"),
-    role,
+    role: normalizedInput.role,
     content: text,
     createdAt: Date.now(),
-    ...extras
+    ...normalizedInput
   });
   if (state.aiChatMessages.length > 80) {
     state.aiChatMessages = state.aiChatMessages.slice(-80);
@@ -1387,8 +1790,9 @@ function clearPendingAIRouteActions() {
 
 function refreshAIConversations() {
   return listAIConversations()
-    .then((conversations) => {
-      state.aiConversations = conversations;
+    .then(async (conversations) => {
+      const normalizedConversations = await normalizeAllStoredAIConversations(conversations);
+      state.aiConversations = normalizedConversations;
     })
     .catch((error) => {
       console.warn("刷新 AI 会话列表失败", error);
@@ -1404,6 +1808,37 @@ function persistCurrentAIConversation() {
     .catch((error) => {
       console.warn("保存 AI 会话失败", error);
     });
+}
+
+async function normalizeConversationMessagesIfNeeded(conversation, options = {}) {
+  if (!conversation) {
+    return conversation;
+  }
+
+  const result = normalizeAIChatMessages(conversation.messages || []);
+  if (!result.changed) {
+    return {
+      ...conversation,
+      messages: result.messages
+    };
+  }
+
+  if (options.persist !== false) {
+    await saveAIConversationMessages(conversation.id, result.messages);
+  }
+
+  return {
+    ...conversation,
+    messages: result.messages
+  };
+}
+
+async function normalizeAllStoredAIConversations(conversations = []) {
+  const normalized = [];
+  for (const conversation of conversations) {
+    normalized.push(await normalizeConversationMessagesIfNeeded(conversation));
+  }
+  return normalized;
 }
 
 function getEditorOverlayOpenState() {
@@ -1429,14 +1864,13 @@ async function submitAIChat() {
   renderAIChatPanel();
 
   try {
-    const response = await chatWithAI(state.aiChatMessages);
+    const response = normalizeAIChatResponse(await chatWithAI(state.aiChatMessages));
     const answer = response.reply || "";
     const plan = response.plan || null;
+    const routeMeta = deriveRouteMetadataFromPlan(plan);
     if (response.type === "route_plan" && plan) {
-      const dayPlans = Array.isArray(plan.days)
-        ? plan.days.map((day) => (Array.isArray(day?.places) ? day.places.map((place) => place.name).filter(Boolean) : []))
-        : [];
-      const places = dayPlans.flat();
+      const dayPlans = routeMeta.routeDayPlans;
+      const places = routeMeta.routePlaces;
       if (places.length < 2) {
         pushAIChatMessage("assistant", answer);
         return;
@@ -1445,7 +1879,7 @@ async function submitAIChat() {
       pushAIChatMessage("assistant", assistantContent, {
         routePlaces: places,
         routeDayPlans: dayPlans,
-        routeTargetCity: plan?.city || "",
+        routeTargetCity: routeMeta.routeTargetCity,
         routeActionStatus: "pending"
       });
     } else if (response.type === "cancel_or_negative") {
@@ -1535,7 +1969,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "select-conversation") {
-    const conversation = await getAIConversation(target.dataset.conversationId);
+    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId));
     if (!conversation) {
       setToast("未找到该对话", "warning");
       return;
@@ -1548,7 +1982,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "rename-conversation") {
-    const conversation = await getAIConversation(target.dataset.conversationId);
+    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId), { persist: false });
     if (!conversation) {
       return;
     }
@@ -1594,7 +2028,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "delete-conversation") {
-    const conversation = await getAIConversation(target.dataset.conversationId);
+    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId), { persist: false });
     if (!conversation) {
       return;
     }
@@ -1604,7 +2038,7 @@ async function handleAIChatAction(event) {
     }
     const next = await deleteAIConversation(conversation.id);
     state.aiConversationId = next.id;
-    state.aiChatMessages = next.messages || [];
+    state.aiChatMessages = normalizeAIChatMessages(next.messages).messages;
     await refreshAIConversations();
     renderAIChatPanel();
     return;
@@ -1629,8 +2063,9 @@ async function handleAIChatAction(event) {
         const text = await file.text();
         const imported = await importAIConversations(JSON.parse(text), "append");
         if (imported) {
-          state.aiConversationId = imported.id;
-          state.aiChatMessages = imported.messages || [];
+          const normalizedImported = await normalizeConversationMessagesIfNeeded(imported);
+          state.aiConversationId = normalizedImported.id;
+          state.aiChatMessages = normalizedImported.messages || [];
         }
         await refreshAIConversations();
         renderAIChatPanel();
@@ -1650,7 +2085,7 @@ async function handleAIChatAction(event) {
     }
     const conversation = await clearAIConversations();
     state.aiConversationId = conversation.id;
-    state.aiChatMessages = conversation.messages || [];
+    state.aiChatMessages = normalizeAIChatMessages(conversation.messages).messages;
     await refreshAIConversations();
     renderAIChatPanel();
     setToast("全部 AI 对话已清空", "success");
@@ -2055,28 +2490,31 @@ function renderAIChatPanel() {
     ? state.aiChatMessages
         .map(
           (message) => {
-            const canRetryRoute = ["pending", "failed"].includes(message.routeActionStatus);
-            const visibleContent = message.role === "assistant" ? stripAIRouteActionTail(message.content) : message.content;
-            const routeStatus = message.routeActionStatus && message.routeActionStatus !== "pending"
-              ? `<span class="ai-route-status" data-status="${message.routeActionStatus}">${escapeHtml(getAIRouteActionLabel(message.routeActionStatus))}</span>`
+            const normalizedMessage = message.role === "assistant" ? normalizeAIChatMessage(message).normalized : message;
+            const canRetryRoute = ["pending", "failed"].includes(normalizedMessage.routeActionStatus);
+            const visibleContent = normalizedMessage.role === "assistant"
+              ? stripAIRouteActionTail(normalizedMessage.content)
+              : normalizedMessage.content;
+            const routeStatus = normalizedMessage.routeActionStatus && normalizedMessage.routeActionStatus !== "pending"
+              ? `<span class="ai-route-status" data-status="${normalizedMessage.routeActionStatus}">${escapeHtml(getAIRouteActionLabel(normalizedMessage.routeActionStatus))}</span>`
               : "";
             return `
-            <article class="ai-chat-message ${message.role === "user" ? "user" : "assistant"}">
+            <article class="ai-chat-message ${normalizedMessage.role === "user" ? "user" : "assistant"}">
               <div class="ai-chat-message-content">
-                <p>${escapeHtml(visibleContent)}</p>
+                <p>${formatMultilineTextHtml(visibleContent)}</p>
                 ${
-                  message.role === "assistant" && Array.isArray(message.routePlaces) && message.routePlaces.length >= 2
+                  normalizedMessage.role === "assistant" && Array.isArray(normalizedMessage.routePlaces) && normalizedMessage.routePlaces.length >= 2
                     ? `<div class="ai-route-actions">
                         <button
                           data-ai-action="apply-route-yes"
-                          data-message-id="${message.id}"
+                          data-message-id="${normalizedMessage.id}"
                           class="btn tiny"
                           type="button"
                           ${canRetryRoute ? "" : "disabled"}
                         >是</button>
                         <button
                           data-ai-action="apply-route-no"
-                          data-message-id="${message.id}"
+                          data-message-id="${normalizedMessage.id}"
                           class="btn tiny soft"
                           type="button"
                           ${canRetryRoute ? "" : "disabled"}
@@ -4386,10 +4824,17 @@ async function initMap() {
 }
 
 async function boot() {
-  const aiChatState = await initAIChatStore(loadAIChatMessages());
-  state.aiConversations = aiChatState.conversations;
+  const legacyMessages = normalizeAIChatMessages(loadAIChatMessages()).messages;
+  if (legacyMessages.length) {
+    saveAIChatMessages(legacyMessages);
+  }
+  const aiChatState = await initAIChatStore(legacyMessages);
+  state.aiConversations = await normalizeAllStoredAIConversations(aiChatState.conversations);
   state.aiConversationId = aiChatState.currentConversationId;
-  state.aiChatMessages = aiChatState.messages;
+  state.aiChatMessages = normalizeAIChatMessages(aiChatState.messages).messages;
+  if (state.aiConversationId) {
+    await saveAIConversationMessages(state.aiConversationId, state.aiChatMessages);
+  }
   state.layers = normalizeLayers(state.layers);
   if (state.selectedLayerId && !state.layers.some((layer) => layer.id === state.selectedLayerId)) {
     state.selectedLayerId = null;
