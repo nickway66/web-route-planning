@@ -2,7 +2,14 @@ import { getWorkspace, importLocalWorkspace as importWorkspace, saveWorkspace } 
 
 const SAVE_DEBOUNCE_MS = 800;
 
-export function createWorkspaceSync({ getLayers, applyLayers, onStatus, normalizeLayers = (layers) => layers }) {
+export function createWorkspaceSync({
+  getLayers,
+  applyLayers,
+  onStatus,
+  normalizeLayers = (layers) => layers,
+  workspaceApi = { getWorkspace, importLocalWorkspace: importWorkspace, saveWorkspace },
+  saveDebounceMs = SAVE_DEBOUNCE_MS
+}) {
   let saveTimer = null;
   let saveInFlight = false;
   let saveDirty = false;
@@ -32,14 +39,14 @@ export function createWorkspaceSync({ getLayers, applyLayers, onStatus, normaliz
     saveInFlight = true;
     reportStatus("saving");
     try {
-      await saveWorkspace(snapshot);
+      await workspaceApi.saveWorkspace(snapshot);
       if (isCurrentGeneration(generation)) reportStatus("synced");
     } catch (error) {
       if (isCurrentGeneration(generation)) reportStatus("unsynced");
     } finally {
       saveInFlight = false;
-      if (isCurrentGeneration(generation) && saveDirty) {
-        scheduleSaveAttempt(generation, Math.max(0, nextSaveDueAt - Date.now()));
+      if (!disposed && saveDirty) {
+        scheduleSaveAttempt(authGeneration, Math.max(0, nextSaveDueAt - Date.now()));
       }
     }
   }
@@ -48,7 +55,7 @@ export function createWorkspaceSync({ getLayers, applyLayers, onStatus, normaliz
     const generation = authGeneration;
     reportStatus("loading");
     try {
-      const workspace = await getWorkspace();
+      const workspace = await workspaceApi.getWorkspace();
       if (!isCurrentGeneration(generation)) return null;
       const layers = Array.isArray(workspace?.layers) ? workspace.layers : [];
       if (layers.length) {
@@ -67,15 +74,15 @@ export function createWorkspaceSync({ getLayers, applyLayers, onStatus, normaliz
     latestSnapshot = { dataVersion: 1, layers: getLayers() };
     saveDirty = true;
     const generation = authGeneration;
-    nextSaveDueAt = Date.now() + SAVE_DEBOUNCE_MS;
-    scheduleSaveAttempt(generation, SAVE_DEBOUNCE_MS);
+    nextSaveDueAt = Date.now() + saveDebounceMs;
+    scheduleSaveAttempt(generation, saveDebounceMs);
   }
 
   async function importLocalWorkspace(payload) {
     const generation = authGeneration;
     reportStatus("saving");
     try {
-      const workspace = await importWorkspace(payload);
+      const workspace = await workspaceApi.importLocalWorkspace(payload);
       if (isCurrentGeneration(generation)) reportStatus("synced");
       return isCurrentGeneration(generation) ? workspace : null;
     } catch (error) {
