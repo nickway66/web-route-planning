@@ -113,7 +113,8 @@ def test_frontend_ai_chat_uses_backend_envelope_only():
     assert "resolveZhipuCredentials" not in source
     assert "buildZhipuAuthorizationHeader" not in source
     assert "requestZhipuReply" not in source
-    assert "chatWithAI(state.aiChatMessages)" in source
+    assert "const submissionMessages = await getSubmissionMessages(submission);" in source
+    assert "chatWithAI(submissionMessages)" in source
 
 
 def test_frontend_ai_chat_only_route_plan_creates_route_actions():
