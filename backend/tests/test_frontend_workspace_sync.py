@@ -151,3 +151,10 @@ def test_empty_cloud_only_offers_login_time_anonymous_workspace_for_import():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_successful_anonymous_import_immediately_applies_returned_cloud_layers():
+    source = (ROOT / "src/main.js").read_text(encoding="utf-8")
+
+    assert "const importedWorkspace = await workspaceSync.importLocalWorkspace" in source
+    assert "applyCloudLayers(importedWorkspace.layers)" in source

@@ -1350,7 +1350,10 @@ async function syncWorkspaceAfterLogin(anonymousLayers = []) {
     return;
   }
   if (window.confirm("云端路线为空，是否导入当前设备上的本地路线？")) {
-    await workspaceSync.importLocalWorkspace({ dataVersion: 1, layers: anonymousLayers });
+    const importedWorkspace = await workspaceSync.importLocalWorkspace({ dataVersion: 1, layers: anonymousLayers });
+    if (Array.isArray(importedWorkspace?.layers)) {
+      applyCloudLayers(importedWorkspace.layers);
+    }
   }
 }
 
