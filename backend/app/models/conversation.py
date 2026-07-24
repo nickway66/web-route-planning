@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.database import Base
 
-from .user import utc_now
+from .user import UUID_SERVER_DEFAULT, generate_uuid, utc_now
 
 if TYPE_CHECKING:
     from .user import User
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid, server_default=UUID_SERVER_DEFAULT)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="New conversation")
     city: Mapped[str] = mapped_column(String(100), nullable=False, default="")
@@ -37,7 +37,7 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (UniqueConstraint("conversation_id", "sequence", name="uq_chat_messages_conversation_sequence"),)
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid, server_default=UUID_SERVER_DEFAULT)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)

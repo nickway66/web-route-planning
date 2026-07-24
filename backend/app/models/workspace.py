@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.database import Base
 
-from .user import utc_now
+from .user import UUID_SERVER_DEFAULT, generate_uuid, utc_now
 
 if TYPE_CHECKING:
     from .user import User
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 class Workspace(Base):
     __tablename__ = "workspaces"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid, server_default=UUID_SERVER_DEFAULT)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="My workspace")
     data_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

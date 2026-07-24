@@ -1,4 +1,5 @@
 from pathlib import Path
+import uuid
 
 from alembic import command
 from alembic.config import Config
@@ -18,6 +19,23 @@ def test_models_define_required_ownership_constraints():
     )
 
 
+def test_models_generate_uuid_primary_keys_on_flush(db_session):
+    from backend.app.models import ChatMessage, Conversation, User, Workspace
+
+    user = User(email="user@example.com", password_hash="hash", display_name="User")
+    workspace = Workspace(user=user)
+    conversation = Conversation(user=user)
+    message = ChatMessage(conversation=conversation, role="user", content="Hello", sequence=1)
+    db_session.add_all([user, workspace, conversation, message])
+
+    db_session.flush()
+
+    for instance in (user, workspace, conversation, message):
+        assert isinstance(instance.id, str)
+        assert len(instance.id) == 36
+        assert str(uuid.UUID(instance.id)) == instance.id
+
+
 def test_alembic_upgrade_creates_chat_tables_with_cascade_foreign_key(tmp_path, monkeypatch):
     from backend.app.config import settings
 
@@ -33,8 +51,16 @@ def test_alembic_upgrade_creates_chat_tables_with_cascade_foreign_key(tmp_path, 
             connection.execute(text("PRAGMA foreign_keys=ON"))
             assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
             foreign_keys = inspect(connection).get_foreign_keys("chat_messages")
+            connection.execute(
+                text(
+                    "INSERT INTO users (email, password_hash, display_name, is_active, created_at, updated_at) "
+                    "VALUES ('migration@example.com', 'hash', 'Migration', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            generated_id = connection.execute(text("SELECT id FROM users WHERE email = 'migration@example.com'")).scalar_one()
 
         assert {"users", "workspaces", "conversations", "chat_messages"} <= set(inspect(engine).get_table_names())
+        assert str(uuid.UUID(generated_id)) == generated_id
         assert any(
             foreign_key["constrained_columns"] == ["conversation_id"]
             and foreign_key["options"].get("ondelete") == "CASCADE"
