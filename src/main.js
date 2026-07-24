@@ -4992,7 +4992,10 @@ async function boot() {
       setToast("登录已失效，请重新登录。", "warning");
     }
   });
-  subscribeAuth(() => renderAuthEntry());
+  subscribeAuth(() => {
+    workspaceSync?.cancelWorkspaceSave();
+    renderAuthEntry();
+  });
   applyThemeMode(state.themeMode, false);
   renderLeftPanel();
   renderRightPanel();
