@@ -85,3 +85,17 @@ def test_register_works_without_jwt_secret_but_login_reports_configuration_error
     )
     assert login.status_code == 500
     assert "JWT_SECRET" in login.json()["detail"]
+
+
+def test_me_reports_missing_jwt_secret_after_a_token_was_issued(client, monkeypatch):
+    payload = {"email": "user@example.com", "password": "correct-horse-42"}
+    assert client.post("/api/auth/register", json=payload).status_code == 201
+    token = client.post("/api/auth/login", json=payload).json()["accessToken"]
+
+    from backend.app.config import settings
+
+    monkeypatch.setattr(settings, "jwt_secret", "")
+    response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 500
+    assert "JWT_SECRET" in response.json()["detail"]
