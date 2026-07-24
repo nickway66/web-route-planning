@@ -43,6 +43,15 @@ def test_cloud_mode_never_writes_indexeddb_and_only_persists_successful_assistan
     assert "pushAIChatMessage(\"assistant\", `请求失败" not in source
 
 
+def test_rapid_cloud_submits_acquire_the_pending_lock_before_creating_a_conversation():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    submit = source[source.index("async function submitAIChat()") : source.index("function toggleAIChatPanel()")]
+
+    lock_index = submit.index("state.aiChatPending = true")
+    first_cloud_write_index = submit.index('await appendAIChatMessage("user", question)')
+    assert lock_index < first_cloud_write_index
+
+
 def test_conversation_api_normalizes_server_shapes():
     node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
     script = r'''

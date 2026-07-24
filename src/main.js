@@ -2021,11 +2021,12 @@ async function submitAIChat() {
     return;
   }
 
+  state.aiChatPending = true;
+  input.value = "";
+  renderAIChatPanel();
+
   try {
-    input.value = "";
     await appendAIChatMessage("user", question);
-    state.aiChatPending = true;
-    renderAIChatPanel();
     const response = normalizeAIChatResponse(await chatWithAI(state.aiChatMessages));
     const answer = response.reply || "";
     const plan = response.plan || null;
