@@ -41,3 +41,8 @@ __pycache__/
 tmp/
 *.tmp
 .worktrees/
+
+# local SQLite databases
+backend/data/*.db
+*.sqlite
+*.sqlite3
