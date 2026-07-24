@@ -79,6 +79,15 @@ def test_first_cloud_conversation_creation_does_not_overwrite_a_newly_selected_c
     assert "if (!isCurrentAIChatCreation(submission)) return null" in create_submission
 
 
+def test_new_or_cleared_conversation_creation_discards_stale_auth_or_selection_results():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    action_handler = source[source.index("async function handleAIChatAction") : source.index("function handleAIChatKeydown")]
+
+    assert "captureAIConversationCreation()" in action_handler
+    assert "isCurrentAIConversationCreation(creation)" in action_handler
+    assert "createCurrentAIConversation(creation)" in action_handler
+
+
 def test_conversation_api_normalizes_server_shapes():
     node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
     script = r'''

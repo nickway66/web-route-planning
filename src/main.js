@@ -1967,9 +1967,24 @@ async function getSubmissionMessages(submission) {
   return conversation.messages || [];
 }
 
-async function createCurrentAIConversation() {
-  if (isCloudConversationMode()) return createCloudConversation();
-  return createAIConversation();
+function captureAIConversationCreation() {
+  const mode = isCloudConversationMode() ? "cloud" : "local";
+  return {
+    mode,
+    authToken: mode === "cloud" ? getAuthState().token : "",
+    authGeneration: aiConversationAuthGeneration,
+    selectionGeneration: aiConversationSelectionGeneration
+  };
+}
+
+function isCurrentAIConversationCreation(creation) {
+  return isCurrentAIChatSubmission(creation)
+    && creation.selectionGeneration === aiConversationSelectionGeneration;
+}
+
+async function createCurrentAIConversation(creation) {
+  const conversation = creation.mode === "cloud" ? await createCloudConversation() : await createAIConversation();
+  return isCurrentAIConversationCreation(creation) ? conversation : null;
 }
 
 async function updateCurrentAIConversation(id, changes) {
@@ -2170,11 +2185,15 @@ async function handleAIChatAction(event) {
     }
 
     aiConversationSelectionGeneration += 1;
+    const creation = captureAIConversationCreation();
 
     if (isCloudConversationMode()) {
       try {
-        if (state.aiConversationId) await deleteCloudConversation(state.aiConversationId);
-        const conversation = await createCloudConversation();
+        const conversationId = state.aiConversationId;
+        if (conversationId) await deleteCloudConversation(conversationId);
+        if (!isCurrentAIConversationCreation(creation)) return;
+        const conversation = await createCurrentAIConversation(creation);
+        if (!conversation || !isCurrentAIConversationCreation(creation)) return;
         state.aiConversationId = conversation.id;
         state.aiChatMessages = [];
         await refreshAIConversations();
@@ -2202,7 +2221,9 @@ async function handleAIChatAction(event) {
 
   if (action === "new-conversation") {
     aiConversationSelectionGeneration += 1;
-    const conversation = await createCurrentAIConversation();
+    const creation = captureAIConversationCreation();
+    const conversation = await createCurrentAIConversation(creation);
+    if (!conversation || !isCurrentAIConversationCreation(creation)) return;
     state.aiConversationId = conversation.id;
     state.aiChatMessages = [];
     state.aiHistoryOpen = true;
