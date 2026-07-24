@@ -19,10 +19,11 @@ def test_frontend_exposes_auth_api_and_authorized_request_client():
     assert "setUnauthorizedHandler" in api_client
 
 
-def test_export_route_data_reads_raw_response_text_instead_of_json_object():
+def test_export_route_data_preserves_exact_server_response_text_for_every_format():
     source = (ROOT / "src" / "apiClient.js").read_text(encoding="utf-8")
     export_block = source[source.index("export async function exportRouteData") :]
 
     assert "return response.text()" in export_block
-    assert "JSON.stringify(data)" in export_block
+    assert "response.json()" not in export_block
+    assert "JSON.stringify(data)" not in export_block
     assert "return apiRequest(`/api/exports/${format}`" not in export_block

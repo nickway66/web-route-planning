@@ -75,10 +75,5 @@ export async function exportRouteData(format, layers) {
     method: "POST",
     body: JSON.stringify({ layers })
   });
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    const data = await response.json();
-    return JSON.stringify(data);
-  }
   return response.text();
 }
