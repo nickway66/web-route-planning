@@ -1,6 +1,10 @@
 import asyncio
+import json
 
-from backend.app.services.ai import parse_ai_envelope
+import pytest
+
+from backend.app.services import ai as ai_service
+from backend.app.services.ai import _json_object_candidates, is_route_request_message, parse_ai_envelope, request_zhipu_reply
 from backend.app.services.amap import AMapClient, normalize_poi, normalize_route_segments, parse_polyline, route_stats
 from backend.app.services.exports import create_gpx
 from backend.app.services.routes import build_ai_layers, normalize_place_name, optimize_point_order, optimize_point_order_by_route_cost
@@ -429,6 +433,22 @@ def test_create_gpx_contains_routes_tracks_and_points():
     assert 'lat="30.2" lon="104.2"' in gpx
 
 
+def _route_plan_payload(reply="I prepared a route.", places=None):
+    return {
+        "type": "route_plan",
+        "reply": reply,
+        "plan": {
+            "city": "Shenzhen",
+            "days": [
+                {
+                    "day": 1,
+                    "places": [{"name": name} for name in (places or ["Lotus Hill Park", "Shenzhen Museum"])],
+                }
+            ],
+        },
+    }
+
+
 def test_parse_ai_envelope_keeps_plain_chat_out_of_route_flow():
     result = parse_ai_envelope('{"type":"chat","reply":"I can use the current conversation context.","plan":null}')
 
@@ -441,10 +461,175 @@ def test_parse_ai_envelope_accepts_route_plan_with_two_places():
     )
 
     assert result["type"] == "route_plan"
-    assert result["reply"] == "I prepared a Guangzhou route."
+    assert "Canton Tower" in result["reply"]
+    assert "Guangdong Museum" in result["reply"]
+    assert not result["reply"].startswith("{")
     assert result["plan"]["city"] == "Guangzhou"
     assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["Canton Tower", "Guangdong Museum"]
     assert result["parsedPlan"] == result["plan"]
+
+
+def test_parse_ai_envelope_accepts_raw_route_plan_json_without_fence():
+    payload = _route_plan_payload("I mapped out a Shenzhen day trip.", ["Lianhua Mountain Park", "Shenzhen Bay Park", "Window of the World"])
+
+    result = parse_ai_envelope(json.dumps(payload))
+
+    assert result["type"] == "route_plan"
+    assert "Lianhua Mountain Park" in result["reply"]
+    assert "Shenzhen Bay Park" in result["reply"]
+    assert "Window of the World" in result["reply"]
+    assert result["plan"]["city"] == "Shenzhen"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == [
+        "Lianhua Mountain Park",
+        "Shenzhen Bay Park",
+        "Window of the World",
+    ]
+
+
+def test_parse_ai_envelope_builds_detailed_route_reply_from_plan_fields():
+    payload = {
+        "type": "route_plan",
+        "reply": "包括以下景点。",
+        "plan": {
+            "city": "深圳",
+            "days": [
+                {
+                    "day": 1,
+                    "places": [
+                        {
+                            "name": "桔钓沙",
+                            "duration": "2小时",
+                            "cost": "免费",
+                            "hours": "全天开放",
+                            "description": "海水清澈，适合看海和放松。",
+                        },
+                        {
+                            "name": "深圳湾公园",
+                            "duration": "1.5小时",
+                            "cost": "免费",
+                            "hours": "06:00-23:00",
+                            "description": "适合沿海散步和看日落。",
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+
+    result = parse_ai_envelope(json.dumps(payload, ensure_ascii=False))
+
+    assert result["type"] == "route_plan"
+    assert "桔钓沙" in result["reply"]
+    assert "深圳湾公园" in result["reply"]
+    assert "2小时" in result["reply"]
+    assert "1.5小时" in result["reply"]
+    assert "免费" in result["reply"]
+    assert "全天开放" in result["reply"]
+    assert "06:00-23:00" in result["reply"]
+    assert "海水清澈，适合看海和放松。" in result["reply"]
+    assert "适合沿海散步和看日落。" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+
+
+def test_json_object_candidates_and_parse_handle_full_raw_route_plan_with_chinese_text():
+    raw = json.dumps(
+        {
+            "type": "route_plan",
+            "reply": "已为你整理一条深圳两日路线，涵盖城市地标、滨海休闲和文化展览。",
+            "plan": {
+                "city": "深圳",
+                "days": [
+                    {
+                        "day": 1,
+                        "places": [
+                            {
+                                "name": "莲花山公园",
+                                "duration": "2小时",
+                                "cost": "免费",
+                                "hours": "06:00-22:30",
+                                "description": "适合俯瞰城市中轴线，节奏比较从容。",
+                            },
+                            {
+                                "name": "深圳市民中心",
+                                "duration": "1小时",
+                                "cost": "免费",
+                                "hours": "09:00-17:00",
+                                "description": "深圳的政治、文化中心，可以参观展览和休闲。",
+                            },
+                        ],
+                    },
+                    {
+                        "day": 2,
+                        "places": [
+                            {
+                                "name": "深圳湾公园",
+                                "duration": "2小时",
+                                "cost": "免费",
+                                "hours": "全天开放",
+                                "description": "适合海边散步，看日落。",
+                            },
+                            {
+                                "name": "华侨城创意文化园",
+                                "duration": "2小时",
+                                "cost": "免费",
+                                "hours": "10:00-22:00",
+                                "description": "园区里有展览、咖啡馆和设计店铺。",
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    candidates = _json_object_candidates(raw)
+    result = parse_ai_envelope(raw)
+
+    assert len(candidates) >= 1
+    assert result["type"] == "route_plan"
+    assert "莲花山公园" in result["reply"]
+    assert "深圳市民中心" in result["reply"]
+    assert "深圳湾公园" in result["reply"]
+    assert "华侨城创意文化园" in result["reply"]
+    assert "2小时" in result["reply"]
+    assert "10:00-22:00" in result["reply"]
+    assert result["plan"]["city"] == "深圳"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["莲花山公园", "深圳市民中心"]
+
+
+def test_parse_ai_envelope_accepts_route_plan_with_literal_newlines_in_reply():
+    raw = """{"type":"route_plan","reply":"已为你整理深圳一日路线，具体行程如下：
+1. 先去桔钓沙看海。
+2. 再去大梅沙海滨公园散步。","plan":{"city":"深圳","days":[{"day":1,"places":[{"name":"桔钓沙","duration":"2小时","cost":"免费","hours":"全天开放","description":"海水清澈，适合看海。"},{"name":"大梅沙海滨公园","duration":"2小时","cost":"免费","hours":"全天开放","description":"适合海边散步和休闲。"}]}]}}"""
+
+    result = parse_ai_envelope(raw)
+
+    assert result["type"] == "route_plan"
+    assert "桔钓沙" in result["reply"]
+    assert "大梅沙海滨公园" in result["reply"]
+    assert "2小时" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+    assert result["plan"]["city"] == "深圳"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["桔钓沙", "大梅沙海滨公园"]
+
+
+def test_parse_ai_envelope_repairs_truncated_route_plan_missing_closing_tokens():
+    raw = (
+        '{"type":"route_plan","reply":"已为你整理深圳夜游路线。","plan":{"city":"深圳","days":[{"day":1,'
+        '"places":[{"name":"桔钓沙","description":"看海放松。"},{"name":"深圳湾公园","description":"适合夜间散步。"}]}}'
+    )
+
+    result = parse_ai_envelope(raw)
+
+    assert result["type"] == "route_plan"
+    assert "桔钓沙" in result["reply"]
+    assert "深圳湾公园" in result["reply"]
+    assert "看海放松。" in result["reply"]
+    assert result["plan"]["city"] == "深圳"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["桔钓沙", "深圳湾公园"]
 
 
 def test_parse_ai_envelope_downgrades_invalid_route_plan_to_travel_advice():
@@ -472,3 +657,355 @@ def test_parse_ai_envelope_bad_json_falls_back_to_chat_text():
     result = parse_ai_envelope("Plain answer, not JSON")
 
     assert result == {"type": "chat", "reply": "Plain answer, not JSON", "plan": None, "parsedPlan": None}
+
+
+def test_parse_ai_envelope_strips_fenced_route_envelope_from_reply():
+    payload = _route_plan_payload("Your Shenzhen day trip is ready.")
+
+    result = parse_ai_envelope(f"```json\n{json.dumps(payload)}\n```\nExtra explanation")
+
+    assert result["type"] == "route_plan"
+    assert "Lotus Hill Park" in result["reply"]
+    assert "Shenzhen Museum" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["Lotus Hill Park", "Shenzhen Museum"]
+
+
+def test_parse_ai_envelope_accepts_fenced_route_without_closing_fence():
+    payload = _route_plan_payload("I already organized the route.")
+
+    result = parse_ai_envelope(f"```json\n{json.dumps(payload)}\nMore natural language after the JSON")
+
+    assert result["type"] == "route_plan"
+    assert "Lotus Hill Park" in result["reply"]
+    assert "Shenzhen Museum" in result["reply"]
+
+
+def test_parse_ai_envelope_extracts_embedded_route_plan_from_mixed_text():
+    payload = _route_plan_payload("Use this route.")
+
+    result = parse_ai_envelope(f"Here is the useful part: {json.dumps(payload)} Thanks.")
+
+    assert result["type"] == "route_plan"
+    assert "Lotus Hill Park" in result["reply"]
+    assert "Shenzhen Museum" in result["reply"]
+
+
+def test_parse_ai_envelope_unwraps_nested_fenced_envelope_reply():
+    nested_payload = _route_plan_payload("I arranged the route for you.", ["OCT Loft", "Shenzhen Talent Park"])
+    outer_payload = {"type": "chat", "reply": f"```json\n{json.dumps(nested_payload)}\n```", "plan": None}
+
+    result = parse_ai_envelope(json.dumps(outer_payload))
+
+    assert result["type"] == "route_plan"
+    assert "OCT Loft" in result["reply"]
+    assert "Shenzhen Talent Park" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["OCT Loft", "Shenzhen Talent Park"]
+
+
+def test_parse_ai_envelope_bad_fenced_json_uses_natural_language_fallback():
+    result = parse_ai_envelope('```json\n{"type":"chat","reply":"oops"\nYou can still continue planning the Shenzhen route.')
+
+    assert result["type"] == "chat"
+    assert result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+    assert "Shenzhen route" in result["reply"]
+
+
+def test_request_zhipu_reply_retries_once_for_explicit_route_request(monkeypatch):
+    first_reply = {"type": "chat", "reply": "I will start with a few suggestions.", "plan": None}
+    second_reply = _route_plan_payload("I arranged a Shenzhen day trip.", ["Lianhua Mountain Park", "Shenzhen Bay Park", "Talent Park"])
+    responses = [
+        {"choices": [{"message": {"content": json.dumps(first_reply)}}]},
+        {"choices": [{"message": {"content": json.dumps(second_reply)}}]},
+    ]
+    captured_payloads = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured_payloads.append(json)
+            return FakeResponse(responses[len(captured_payloads) - 1])
+
+    monkeypatch.setattr(ai_service, "build_zhipu_auth", lambda api_key, api_id="": "Bearer test")
+    monkeypatch.setattr(ai_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        request_zhipu_reply(
+            [{"role": "user", "content": "给我一条深圳一日游路线，至少三个地点。"}],
+            "test-key",
+            "",
+            "glm-test",
+        )
+    )
+
+    assert len(captured_payloads) == 2
+    assert result["type"] == "route_plan"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == [
+        "Lianhua Mountain Park",
+        "Shenzhen Bay Park",
+        "Talent Park",
+    ]
+    assert captured_payloads[1]["messages"][0]["role"] == "system"
+    assert "route_plan" in captured_payloads[1]["messages"][0]["content"]
+    assert captured_payloads[1]["messages"][-1]["role"] == "user"
+    assert sum(1 for message in captured_payloads[1]["messages"] if message["role"] == "system") == 1
+
+
+def test_request_zhipu_reply_retries_once_for_route_revision_context(monkeypatch):
+    first_reply = {"type": "chat", "reply": "可以考虑海边。", "plan": None}
+    second_reply = {
+        "type": "route_plan",
+        "reply": "我帮你把桔钓沙加进行程里了。",
+        "plan": {
+            "city": "深圳",
+            "days": [
+                {
+                    "day": 1,
+                    "places": [
+                        {"name": "桔钓沙"},
+                        {"name": "深圳湾公园"},
+                    ],
+                }
+            ],
+        },
+    }
+    responses = [
+        {"choices": [{"message": {"content": json.dumps(first_reply, ensure_ascii=False)}}]},
+        {"choices": [{"message": {"content": json.dumps(second_reply, ensure_ascii=False)}}]},
+    ]
+    captured_payloads = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured_payloads.append(json)
+            return FakeResponse(responses[len(captured_payloads) - 1])
+
+    monkeypatch.setattr(ai_service, "build_zhipu_auth", lambda api_key, api_id="": "Bearer test")
+    monkeypatch.setattr(ai_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        request_zhipu_reply(
+            [
+                {"role": "user", "content": "给我一条深圳一日路线，至少两个地点。"},
+                {"role": "assistant", "content": json.dumps(_route_plan_payload("已整理路线。", ["莲花山公园", "深圳湾公园"]), ensure_ascii=False)},
+                {"role": "user", "content": "我想去桔钓沙"},
+            ],
+            "test-key",
+            "",
+            "glm-test",
+        )
+    )
+
+    assert len(captured_payloads) == 2
+    assert result["type"] == "route_plan"
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]] == ["桔钓沙", "深圳湾公园"]
+
+
+def test_request_zhipu_reply_falls_back_to_rebuilt_route_plan_after_retry_misses(monkeypatch):
+    first_reply = {"type": "travel_advice", "reply": "桔钓沙位于深圳，是一个风景优美的海滩。", "plan": None}
+    second_reply = {"type": "travel_advice", "reply": "你可以考虑去桔钓沙看海。", "plan": None}
+    responses = [
+        {"choices": [{"message": {"content": json.dumps(first_reply, ensure_ascii=False)}}]},
+        {"choices": [{"message": {"content": json.dumps(second_reply, ensure_ascii=False)}}]},
+    ]
+    captured_payloads = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured_payloads.append(json)
+            return FakeResponse(responses[len(captured_payloads) - 1])
+
+    previous_plan = {
+        "type": "route_plan",
+        "reply": "已整理深圳一日路线。",
+        "plan": {
+            "city": "深圳",
+            "days": [
+                {
+                    "day": 1,
+                    "places": [
+                        {"name": "莲花山公园", "duration": "2小时", "cost": "免费", "hours": "06:00-22:30", "description": "适合俯瞰城市景观。"},
+                        {"name": "深圳湾公园", "duration": "1.5小时", "cost": "免费", "hours": "全天开放", "description": "适合海边散步看日落。"},
+                    ],
+                }
+            ],
+        },
+    }
+
+    monkeypatch.setattr(ai_service, "build_zhipu_auth", lambda api_key, api_id="": "Bearer test")
+    monkeypatch.setattr(ai_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        request_zhipu_reply(
+            [
+                {"role": "user", "content": "生成一条深圳一日游路线"},
+                {"role": "assistant", "content": json.dumps(previous_plan, ensure_ascii=False)},
+                {"role": "user", "content": "我想去桔钓沙"},
+            ],
+            "test-key",
+            "",
+            "glm-test",
+        )
+    )
+
+    assert len(captured_payloads) == 2
+    assert "这不是景点建议" in captured_payloads[1]["messages"][0]["content"]
+    assert "桔钓沙" in captured_payloads[1]["messages"][0]["content"]
+    assert result["type"] == "route_plan"
+    assert result["plan"] is not None
+    assert result["parsedPlan"] == result["plan"]
+    assert [place["name"] for place in result["plan"]["days"][0]["places"]][:2] == ["桔钓沙", "莲花山公园"]
+    assert "桔钓沙" in result["reply"]
+    assert "莲花山公园" in result["reply"]
+    assert "深圳湾公园" in result["reply"]
+    assert "2小时" in result["reply"]
+    assert "全天开放" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+
+
+def test_request_zhipu_reply_rebuilds_route_plan_from_natural_language_route_history(monkeypatch):
+    first_reply = {"type": "travel_advice", "reply": "桔钓沙位于深圳，是一个风景优美的海滩。", "plan": None}
+    second_reply = {"type": "travel_advice", "reply": "你可以考虑去桔钓沙看海。", "plan": None}
+    responses = [
+        {"choices": [{"message": {"content": json.dumps(first_reply, ensure_ascii=False)}}]},
+        {"choices": [{"message": {"content": json.dumps(second_reply, ensure_ascii=False)}}]},
+    ]
+    captured_payloads = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured_payloads.append(json)
+            return FakeResponse(responses[len(captured_payloads) - 1])
+
+    assistant_route_text = (
+        "已为你整理深圳路线：\n"
+        "1. 深圳欢乐谷；建议游玩4小时；费用：250元；营业时间：10:00-22:00；简介：大型主题公园\n"
+        "2. 世界之窗；建议游玩3小时；费用：200元；营业时间：10:00-22:00；简介：主题公园"
+    )
+
+    monkeypatch.setattr(ai_service, "build_zhipu_auth", lambda api_key, api_id="": "Bearer test")
+    monkeypatch.setattr(ai_service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        request_zhipu_reply(
+            [
+                {"role": "user", "content": "生成一条深圳一日游路线"},
+                {"role": "assistant", "content": assistant_route_text},
+                {"role": "user", "content": "我想去桔钓沙"},
+            ],
+            "test-key",
+            "",
+            "glm-test",
+        )
+    )
+
+    assert len(captured_payloads) == 2
+    assert "这不是景点建议" in captured_payloads[1]["messages"][0]["content"]
+    assert "桔钓沙" in captured_payloads[1]["messages"][0]["content"]
+    assert result["type"] == "route_plan"
+    assert result["plan"] is not None
+    assert result["parsedPlan"] == result["plan"]
+    place_names = [place["name"] for place in result["plan"]["days"][0]["places"]]
+    assert "桔钓沙" in place_names
+    assert len(place_names) >= 2
+    assert "深圳欢乐谷" in place_names or "世界之窗" in place_names
+    assert "桔钓沙" in result["reply"]
+    assert "深圳欢乐谷" in result["reply"] or "世界之窗" in result["reply"]
+    assert not result["reply"].startswith("{")
+    assert not result["reply"].startswith("```")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("给我一条广州两日旅游路线", True),
+        ("给我一条深圳一日游路线，我想去红树林。至少五个地点", True),
+        ("帮我规划成都三日游", True),
+        ("不要给我规划成都三日游", False),
+        ("取消刚才那条深圳一日游路线", False),
+        ("不用给我旅游路线了", False),
+    ],
+)
+def test_is_route_request_message(text, expected):
+    assert is_route_request_message(text) is expected

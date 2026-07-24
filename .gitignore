@@ -1,7 +1,9 @@
 # dependencies
 node_modules/
 #PRD+UI
-PRD+UI/
+PRD+UI/*
+!PRD+UI/tech_doc.md
+!PRD+UI/product_doc.md
 # build outputs
 dist/
 coverage/
