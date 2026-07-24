@@ -68,3 +68,52 @@ def test_alembic_upgrade_creates_chat_tables_with_cascade_foreign_key(tmp_path, 
         )
     finally:
         engine.dispose()
+
+
+def test_alembic_upgrade_from_0001_adds_uuid_defaults_to_existing_tables(tmp_path, monkeypatch):
+    from backend.app.config import settings
+
+    database_path = tmp_path / "upgraded-models.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setattr(settings, "database_url", database_url)
+    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+
+    command.upgrade(config, "0001")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (email, password_hash, display_name, is_active, created_at, updated_at) "
+                    "VALUES ('upgraded@example.com', 'hash', 'Upgraded', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+            workspace_id = connection.execute(
+                text(
+                    "INSERT INTO workspaces (user_id, name, data_version, layers_data, layer_count, route_count, point_count, created_at, updated_at) "
+                    "VALUES (:user_id, 'Workspace', 1, '[]', 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            conversation_id = connection.execute(
+                text(
+                    "INSERT INTO conversations (user_id, title, city, pinned, archived, route_count, message_count, last_preview, created_at, updated_at) "
+                    "VALUES (:user_id, 'Conversation', '', 0, 0, 0, 0, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            message_id = connection.execute(
+                text(
+                    "INSERT INTO chat_messages (conversation_id, role, content, created_at, sequence) "
+                    "VALUES (:conversation_id, 'user', 'Hello', CURRENT_TIMESTAMP, 1) RETURNING id"
+                ),
+                {"conversation_id": conversation_id},
+            ).scalar_one()
+
+        for generated_id in (user_id, workspace_id, conversation_id, message_id):
+            assert str(uuid.UUID(generated_id)) == generated_id
+    finally:
+        engine.dispose()
