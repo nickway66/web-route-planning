@@ -1,13 +1,20 @@
+from importlib import import_module
+
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.app.database import Base, get_db
+from backend.app.database import Base, get_db, make_engine
 
 
 @pytest.fixture
 def db_session(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False})
+    try:
+        import_module("backend.app.models")
+    except ModuleNotFoundError as error:
+        if error.name != "backend.app.models":
+            raise
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'test.db'}")
     testing_session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
     session = testing_session_local()
