@@ -69,14 +69,19 @@ def test_me_requires_a_bearer_token(client):
     assert response.status_code == 401
 
 
-def test_authentication_reports_missing_jwt_secret_as_a_server_error(client, monkeypatch):
+def test_register_works_without_jwt_secret_but_login_reports_configuration_error(client, monkeypatch):
     from backend.app.config import settings
 
     monkeypatch.setattr(settings, "jwt_secret", "")
-    response = client.post(
+    register = client.post(
         "/api/auth/register",
         json={"email": "user@example.com", "password": "correct-horse-42"},
     )
 
-    assert response.status_code == 500
-    assert "JWT_SECRET" in response.json()["detail"]
+    assert register.status_code == 201
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "correct-horse-42"},
+    )
+    assert login.status_code == 500
+    assert "JWT_SECRET" in login.json()["detail"]

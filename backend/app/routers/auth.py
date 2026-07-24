@@ -27,7 +27,6 @@ def user_response(user: User) -> UserResponse:
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, db: DbSession) -> UserResponse:
-    create_access_token("configuration-check")
     if get_user_by_email(db, str(payload.email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
     user = create_user(
