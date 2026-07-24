@@ -153,6 +153,7 @@ def test_workspace_stops_reading_chunked_oversized_body_without_content_length()
 
     assert sent[0]["status"] == 413
     assert receive_calls == 2
+    assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]
 
 
 def test_workspace_rejects_oversized_content_length_without_reading_body():
@@ -189,6 +190,20 @@ def test_workspace_rejects_oversized_content_length_without_reading_body():
 
     assert sent[0]["status"] == 413
     assert receive_calls == 0
+
+
+def test_workspace_oversize_response_includes_cors_headers(auth_client):
+    payload = workspace_payload()
+    raw_body = __import__("json").dumps(payload) + (" " * (5 * 1024 * 1024))
+
+    response = auth_client.put(
+        "/api/workspace",
+        content=raw_body,
+        headers={"content-type": "application/json", "origin": "http://localhost:5173"},
+    )
+
+    assert response.status_code == 413
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_workspace_rejects_excessive_segments_and_segment_path_points(auth_client):

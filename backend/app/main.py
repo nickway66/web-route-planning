@@ -53,7 +53,9 @@ class WorkspaceBodyLimitMiddleware:
                 received_bytes += len(message.get("body", b""))
                 if received_bytes > MAX_BODY_BYTES:
                     exceeded = True
-                    return {"type": "http.disconnect"}
+                    # End the body normally so downstream request parsing cannot raise
+                    # ClientDisconnect; its response is replaced with the single 413 below.
+                    return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
         async def limited_send(message: Message) -> None:
@@ -81,6 +83,7 @@ class WorkspaceBodyLimitMiddleware:
         )
         await send({"type": "http.response.body", "body": body})
 
+app.add_middleware(WorkspaceBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -88,7 +91,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(WorkspaceBodyLimitMiddleware)
 
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(workspace_router, prefix="/api/workspace", tags=["workspace"])
