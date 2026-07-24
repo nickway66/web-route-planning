@@ -123,3 +123,31 @@ def test_workspace_cache_is_scoped_to_the_authenticated_user_and_keeps_anonymous
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_empty_cloud_only_offers_login_time_anonymous_workspace_for_import():
+    main_source = (ROOT / "src/main.js").read_text(encoding="utf-8")
+    assert "shouldImportAnonymousWorkspace(cloudWorkspace, anonymousLayers)" in main_source
+    assert "const accountLayers" not in main_source
+
+    node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
+    script = r'''
+      import { readFileSync } from "node:fs";
+
+      const source = readFileSync("./src/cloudSync.js", "utf8").replace(
+        'import { getWorkspace, importLocalWorkspace as importWorkspace, saveWorkspace } from "./routeWorkspaceApi";',
+        "const getWorkspace = null; const importWorkspace = null; const saveWorkspace = null;"
+      );
+      const { shouldImportAnonymousWorkspace } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+      const accountCachedLayers = [{ id: "account-a" }];
+      if (shouldImportAnonymousWorkspace({ layers: [] }, [])) throw new Error("empty anonymous cache must not prompt import");
+      if (!accountCachedLayers.length) throw new Error("test setup lost account cache");
+    '''
+    result = subprocess.run(
+        [str(node), "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

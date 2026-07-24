@@ -2,6 +2,10 @@ import { getWorkspace, importLocalWorkspace as importWorkspace, saveWorkspace } 
 
 const SAVE_DEBOUNCE_MS = 800;
 
+export function shouldImportAnonymousWorkspace(cloudWorkspace, anonymousLayers) {
+  return Array.isArray(anonymousLayers) && anonymousLayers.length > 0 && !cloudWorkspace?.layers?.length;
+}
+
 export function createWorkspaceSync({
   getLayers,
   applyLayers,

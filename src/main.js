@@ -6,7 +6,7 @@ import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
 import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI, setUnauthorizedHandler } from "./apiClient";
 import { login, register } from "./authApi";
 import { clearAuthSession, getAuthState, setAuthSession, subscribeAuth } from "./authStore";
-import { createWorkspaceSync } from "./cloudSync";
+import { createWorkspaceSync, shouldImportAnonymousWorkspace } from "./cloudSync";
 import {
   clearAIConversations,
   createAIConversation,
@@ -1345,15 +1345,12 @@ async function syncWorkspaceAfterLogin(anonymousLayers = []) {
   if (!workspaceSync) {
     return;
   }
-  const userId = String(getAuthState().user?.id || "");
-  const accountLayers = userId ? serializeLayersForStorage() : [];
-  const localLayers = accountLayers.length ? accountLayers : anonymousLayers;
   const cloudWorkspace = await workspaceSync.loadCloudWorkspace();
-  if (!cloudWorkspace || cloudWorkspace.layers?.length || !localLayers.length) {
+  if (!cloudWorkspace || !shouldImportAnonymousWorkspace(cloudWorkspace, anonymousLayers)) {
     return;
   }
   if (window.confirm("云端路线为空，是否导入当前设备上的本地路线？")) {
-    await workspaceSync.importLocalWorkspace({ dataVersion: 1, layers: localLayers });
+    await workspaceSync.importLocalWorkspace({ dataVersion: 1, layers: anonymousLayers });
   }
 }
 
