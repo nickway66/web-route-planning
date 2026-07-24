@@ -6,6 +6,7 @@ import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
 import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI, setUnauthorizedHandler } from "./apiClient";
 import { login, register } from "./authApi";
 import { clearAuthSession, getAuthState, setAuthSession, subscribeAuth } from "./authStore";
+import { createWorkspaceSync } from "./cloudSync";
 import {
   clearAIConversations,
   createAIConversation,
@@ -41,6 +42,7 @@ const THEME_STORAGE_KEY = "webmap_theme_mode_v1";
 const AI_CHAT_STORAGE_KEY = "webmap_ai_chat_v1";
 const CANVAS_COLOR_FALLBACK = "rgba(7, 18, 36, 0.92)";
 const app = document.getElementById("app");
+let workspaceSync = null;
 
 const CN_DAY_NUMBER_MAP = {
   零: 0,
@@ -1311,6 +1313,34 @@ function serializeLayersForStorage() {
 
 function persistLayersState() {
   saveLayerState(serializeLayersForStorage());
+  if (getAuthState().isAuthenticated) {
+    workspaceSync?.scheduleWorkspaceSave();
+  }
+}
+
+function applyCloudLayers(layers) {
+  state.layers = normalizeLayers(layers);
+  if (state.selectedLayerId && !state.layers.some((layer) => layer.id === state.selectedLayerId)) {
+    state.selectedLayerId = null;
+  }
+  persistLayersState();
+  rebuildLayers();
+  renderLeftPanel();
+  renderRightPanel();
+}
+
+async function syncWorkspaceAfterLogin() {
+  if (!workspaceSync) {
+    return;
+  }
+  const localLayers = serializeLayersForStorage();
+  const cloudWorkspace = await workspaceSync.loadCloudWorkspace();
+  if (!cloudWorkspace || cloudWorkspace.layers?.length || !localLayers.length) {
+    return;
+  }
+  if (window.confirm("云端路线为空，是否导入当前设备上的本地路线？")) {
+    await workspaceSync.importLocalWorkspace({ dataVersion: 1, layers: localLayers });
+  }
 }
 
 function getLayerSnapshot(layer) {
@@ -2692,6 +2722,7 @@ async function handleAuthSubmit(form) {
     }
     const response = await login(payload);
     setAuthSession(response);
+    await syncWorkspaceAfterLogin();
     state.authDialogMode = "";
     state.authPending = false;
     renderAuthDialog();
@@ -4942,6 +4973,17 @@ async function boot() {
   }
   state.editorVisible = false;
   persistLayersState();
+
+  workspaceSync = createWorkspaceSync({
+    getLayers: serializeLayersForStorage,
+    applyLayers: applyCloudLayers,
+    onStatus: (status) => {
+      if (status === "unsynced" && getAuthState().isAuthenticated) {
+        setToast("云端路线同步失败，本地数据已保留。", "warning");
+      }
+    },
+    normalizeLayers
+  });
 
   buildLayout();
   setUnauthorizedHandler(() => {
