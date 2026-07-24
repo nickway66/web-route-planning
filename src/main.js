@@ -1898,16 +1898,19 @@ async function createAIChatSubmission() {
   const mode = isCloudConversationMode() ? "cloud" : "local";
   const authToken = mode === "cloud" ? getAuthState().token : "";
   const authGeneration = aiConversationAuthGeneration;
+  const selectionGeneration = aiConversationSelectionGeneration;
   let conversationId = state.aiConversationId;
+  const submission = { mode, authToken, authGeneration, selectionGeneration, conversationId };
   if (!conversationId) {
     const conversation = mode === "cloud" ? await createCloudConversation() : await createAIConversation();
-    conversationId = conversation.id;
-    if (isCloudConversationMode() === (mode === "cloud") && !state.aiConversationId) {
-      state.aiConversationId = conversationId;
+    submission.conversationId = conversation.id;
+    if (!isCurrentAIChatCreation(submission)) return null;
+    if (!state.aiConversationId) {
+      state.aiConversationId = submission.conversationId;
       state.aiConversations = [conversation, ...state.aiConversations];
     }
   }
-  return { mode, authToken, authGeneration, conversationId };
+  return submission;
 }
 
 function isCurrentAIChatSubmission(submission) {
@@ -1916,6 +1919,11 @@ function isCurrentAIChatSubmission(submission) {
     return isCloudConversationMode() && getAuthState().token === submission.authToken;
   }
   return !isCloudConversationMode();
+}
+
+function isCurrentAIChatCreation(submission) {
+  return isCurrentAIChatSubmission(submission)
+    && submission.selectionGeneration === aiConversationSelectionGeneration;
 }
 
 async function appendSubmissionMessage(submission, role, content, extras = {}) {
@@ -2010,8 +2018,10 @@ async function normalizeAllStoredAIConversations(conversations = []) {
 
 let aiConversationLoadGeneration = 0;
 let aiConversationAuthGeneration = 0;
+let aiConversationSelectionGeneration = 0;
 
 async function switchAIConversationStore() {
+  aiConversationSelectionGeneration += 1;
   const generation = ++aiConversationLoadGeneration;
   state.aiConversationLoading = true;
   state.aiConversationError = "";
@@ -2075,7 +2085,7 @@ async function submitAIChat() {
 
   try {
     const submission = await createAIChatSubmission();
-    if (!isCurrentAIChatSubmission(submission)) return;
+    if (!submission || !isCurrentAIChatSubmission(submission)) return;
     await appendSubmissionMessage(submission, "user", question);
     const submissionMessages = await getSubmissionMessages(submission);
     if (!submissionMessages) return;
@@ -2159,6 +2169,8 @@ async function handleAIChatAction(event) {
       return;
     }
 
+    aiConversationSelectionGeneration += 1;
+
     if (isCloudConversationMode()) {
       try {
         if (state.aiConversationId) await deleteCloudConversation(state.aiConversationId);
@@ -2189,6 +2201,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "new-conversation") {
+    aiConversationSelectionGeneration += 1;
     const conversation = await createCurrentAIConversation();
     state.aiConversationId = conversation.id;
     state.aiChatMessages = [];
@@ -2200,6 +2213,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "select-conversation") {
+    aiConversationSelectionGeneration += 1;
     const conversation = await normalizeConversationMessagesIfNeeded(await getCurrentAIConversation(target.dataset.conversationId));
     if (!conversation) {
       setToast("未找到该对话", "warning");
@@ -2271,6 +2285,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "delete-conversation") {
+    aiConversationSelectionGeneration += 1;
     const conversation = await normalizeConversationMessagesIfNeeded(await getCurrentAIConversation(target.dataset.conversationId), { persist: false });
     if (!conversation) {
       return;
@@ -2342,6 +2357,7 @@ async function handleAIChatAction(event) {
     if (!ok) {
       return;
     }
+    aiConversationSelectionGeneration += 1;
     if (isCloudConversationMode()) {
       try {
         await Promise.all(state.aiConversations.map((conversation) => deleteCloudConversation(conversation.id)));

@@ -69,6 +69,16 @@ def test_chat_submission_keeps_its_original_conversation_when_selection_or_auth_
     assert "aiConversationAuthGeneration += 1" in source
 
 
+def test_first_cloud_conversation_creation_does_not_overwrite_a_newly_selected_conversation():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    create_submission = source[source.index("async function createAIChatSubmission") : source.index("function isCurrentAIChatSubmission")]
+
+    assert "selectionGeneration" in create_submission
+    assert "isCurrentAIChatCreation(submission)" in source
+    assert "aiConversationSelectionGeneration += 1" in source
+    assert "if (!isCurrentAIChatCreation(submission)) return null" in create_submission
+
+
 def test_conversation_api_normalizes_server_shapes():
     node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
     script = r'''
