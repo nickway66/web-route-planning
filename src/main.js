@@ -1894,22 +1894,69 @@ function persistCurrentAIConversation() {
     });
 }
 
-async function ensureCloudConversation() {
-  if (!isCloudConversationMode()) return null;
-  if (state.aiConversationId) return state.aiConversationId;
-  const conversation = await createCloudConversation();
-  state.aiConversationId = conversation.id;
-  state.aiConversations = [conversation, ...state.aiConversations];
-  return conversation.id;
+async function createAIChatSubmission() {
+  const mode = isCloudConversationMode() ? "cloud" : "local";
+  const authToken = mode === "cloud" ? getAuthState().token : "";
+  const authGeneration = aiConversationAuthGeneration;
+  let conversationId = state.aiConversationId;
+  if (!conversationId) {
+    const conversation = mode === "cloud" ? await createCloudConversation() : await createAIConversation();
+    conversationId = conversation.id;
+    if (isCloudConversationMode() === (mode === "cloud") && !state.aiConversationId) {
+      state.aiConversationId = conversationId;
+      state.aiConversations = [conversation, ...state.aiConversations];
+    }
+  }
+  return { mode, authToken, authGeneration, conversationId };
 }
 
-async function appendAIChatMessage(role, content, extras = {}) {
-  if (!isCloudConversationMode()) return pushAIChatMessage(role, content, extras);
-  const conversationId = await ensureCloudConversation();
-  const stored = await appendCloudMessage(conversationId, { role, content });
-  const message = appendMessageToState(stored, extras);
+function isCurrentAIChatSubmission(submission) {
+  if (submission.authGeneration !== aiConversationAuthGeneration) return false;
+  if (submission.mode === "cloud") {
+    return isCloudConversationMode() && getAuthState().token === submission.authToken;
+  }
+  return !isCloudConversationMode();
+}
+
+async function appendSubmissionMessage(submission, role, content, extras = {}) {
+  if (!isCurrentAIChatSubmission(submission)) return null;
+  if (submission.mode === "cloud") {
+    const stored = await appendCloudMessage(submission.conversationId, { role, content });
+    if (!isCurrentAIChatSubmission(submission)) return null;
+    if (state.aiConversationId === submission.conversationId) {
+      appendMessageToState(stored, extras);
+    }
+    await refreshAIConversations();
+    return stored;
+  }
+
+  const conversation = await getAIConversation(submission.conversationId);
+  if (!conversation || !isCurrentAIChatSubmission(submission)) return null;
+  const message = {
+    id: createId("chat"),
+    role,
+    content: String(content || "").trim(),
+    createdAt: Date.now(),
+    ...extras
+  };
+  if (!message.content) return null;
+  const messages = [...conversation.messages, message].slice(-80);
+  await saveAIConversationMessages(submission.conversationId, messages);
+  if (!isCurrentAIChatSubmission(submission)) return null;
+  if (state.aiConversationId === submission.conversationId) {
+    state.aiChatMessages = messages;
+  }
   await refreshAIConversations();
   return message;
+}
+
+async function getSubmissionMessages(submission) {
+  if (!isCurrentAIChatSubmission(submission)) return null;
+  const conversation = submission.mode === "cloud"
+    ? await getCloudConversation(submission.conversationId)
+    : await getAIConversation(submission.conversationId);
+  if (!conversation || !isCurrentAIChatSubmission(submission)) return null;
+  return conversation.messages || [];
 }
 
 async function createCurrentAIConversation() {
@@ -1962,6 +2009,7 @@ async function normalizeAllStoredAIConversations(conversations = []) {
 }
 
 let aiConversationLoadGeneration = 0;
+let aiConversationAuthGeneration = 0;
 
 async function switchAIConversationStore() {
   const generation = ++aiConversationLoadGeneration;
@@ -2026,8 +2074,13 @@ async function submitAIChat() {
   renderAIChatPanel();
 
   try {
-    await appendAIChatMessage("user", question);
-    const response = normalizeAIChatResponse(await chatWithAI(state.aiChatMessages));
+    const submission = await createAIChatSubmission();
+    if (!isCurrentAIChatSubmission(submission)) return;
+    await appendSubmissionMessage(submission, "user", question);
+    const submissionMessages = await getSubmissionMessages(submission);
+    if (!submissionMessages) return;
+    const response = normalizeAIChatResponse(await chatWithAI(submissionMessages));
+    if (!isCurrentAIChatSubmission(submission)) return;
     const answer = response.reply || "";
     const plan = response.plan || null;
     const routeMeta = deriveRouteMetadataFromPlan(plan);
@@ -2035,21 +2088,21 @@ async function submitAIChat() {
       const dayPlans = routeMeta.routeDayPlans;
       const places = routeMeta.routePlaces;
       if (places.length < 2) {
-        await appendAIChatMessage("assistant", answer);
+        await appendSubmissionMessage(submission, "assistant", answer);
         return;
       }
       const assistantContent = answer;
-      await appendAIChatMessage("assistant", assistantContent, {
+      await appendSubmissionMessage(submission, "assistant", assistantContent, {
         routePlaces: places,
         routeDayPlans: dayPlans,
         routeTargetCity: routeMeta.routeTargetCity,
         routeActionStatus: "pending"
       });
     } else if (response.type === "cancel_or_negative") {
-      clearPendingAIRouteActions();
-      await appendAIChatMessage("assistant", answer);
+      if (state.aiConversationId === submission.conversationId) clearPendingAIRouteActions();
+      await appendSubmissionMessage(submission, "assistant", answer);
     } else {
-      await appendAIChatMessage("assistant", answer);
+      await appendSubmissionMessage(submission, "assistant", answer);
     }
   } catch (error) {
     setToast(error.message || "AI 请求失败，已保留已发送的问题", "danger");
@@ -5187,6 +5240,7 @@ async function boot() {
     }
   });
   subscribeAuth(() => {
+    aiConversationAuthGeneration += 1;
     workspaceSync?.cancelWorkspaceSave();
     const auth = getAuthState();
     const userId = auth.isAuthenticated ? String(auth.user?.id || "") : "";

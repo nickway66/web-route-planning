@@ -36,10 +36,10 @@ def test_cloud_mode_never_writes_indexeddb_and_only_persists_successful_assistan
 
     assert "function isCloudConversationMode()" in source
     assert "if (isCloudConversationMode())" in source
-    assert "async function appendAIChatMessage" in source
-    assert "await appendCloudMessage(conversationId, { role, content })" in source
-    assert "await appendAIChatMessage(\"user\", question)" in source
-    assert "await appendAIChatMessage(\"assistant\", answer)" in source
+    assert "async function appendSubmissionMessage" in source
+    assert "await appendCloudMessage(submission.conversationId, { role, content })" in source
+    assert "await appendSubmissionMessage(submission, \"user\", question)" in source
+    assert "await appendSubmissionMessage(submission, \"assistant\", answer)" in source
     assert "pushAIChatMessage(\"assistant\", `请求失败" not in source
 
 
@@ -48,8 +48,25 @@ def test_rapid_cloud_submits_acquire_the_pending_lock_before_creating_a_conversa
     submit = source[source.index("async function submitAIChat()") : source.index("function toggleAIChatPanel()")]
 
     lock_index = submit.index("state.aiChatPending = true")
-    first_cloud_write_index = submit.index('await appendAIChatMessage("user", question)')
+    first_cloud_write_index = submit.index('await appendSubmissionMessage(submission, "user", question)')
     assert lock_index < first_cloud_write_index
+
+
+def test_chat_submission_keeps_its_original_conversation_when_selection_or_auth_changes():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    submit = source[source.index("async function submitAIChat()") : source.index("function toggleAIChatPanel()")]
+    append = source[source.index("async function appendSubmissionMessage") : source.index("async function getSubmissionMessages")]
+
+    assert "const submission = await createAIChatSubmission()" in submit
+    assert "await appendSubmissionMessage(submission, \"user\", question)" in submit
+    assert "await appendSubmissionMessage(submission, \"assistant\", answer" in submit
+    assert "isCurrentAIChatSubmission(submission)" in submit
+    assert "appendCloudMessage(submission.conversationId" in append
+    assert "saveAIConversationMessages(submission.conversationId" in append
+    assert "state.aiConversationId === submission.conversationId" in append
+    assert "if (!isCurrentAIChatSubmission(submission)) return null" in append
+    assert "authGeneration" in source
+    assert "aiConversationAuthGeneration += 1" in source
 
 
 def test_conversation_api_normalizes_server_shapes():
