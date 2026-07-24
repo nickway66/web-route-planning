@@ -9,6 +9,7 @@ from .services.amap import AMapClient
 from .services.exports import create_gpx, create_json
 from .services.routes import build_ai_layers, plan_route
 from .routers.auth import router as auth_router
+from .routers.conversations import router as conversations_router
 from .routers.workspace import router as workspace_router
 from .workspace_schemas import MAX_BODY_BYTES
 
@@ -93,6 +94,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+app.include_router(conversations_router, prefix="/api/conversations", tags=["conversations"])
 app.include_router(workspace_router, prefix="/api/workspace", tags=["workspace"])
 
 
