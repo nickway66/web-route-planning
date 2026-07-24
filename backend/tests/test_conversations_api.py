@@ -285,3 +285,32 @@ def test_non_contention_database_error_is_not_translated_to_a_conflict(db_sessio
     with pytest.raises(OperationalError) as raised:
         conversations.create_for_user(db_session, user_id=user_id, title="Will fail", city="", max_conversations=1)
     assert raised.value is database_error
+
+
+def test_repository_message_append_is_scoped_to_the_owner(db_session):
+    import pytest
+
+    from backend.app.models import Conversation, User
+    from backend.app.repositories import conversations
+
+    owner = User(email="message-owner@example.com", password_hash="hash", display_name="owner")
+    other = User(email="message-other@example.com", password_hash="hash", display_name="other")
+    db_session.add_all([owner, other])
+    db_session.flush()
+    conversation = Conversation(user_id=owner.id, title="Private", city="")
+    db_session.add(conversation)
+    db_session.commit()
+
+    with pytest.raises(conversations.ConversationNotFound):
+        conversations.add_message(
+            db_session,
+            conversation=conversation,
+            user_id=other.id,
+            role="user",
+            content="unauthorized",
+            max_messages=1,
+        )
+
+    db_session.refresh(conversation)
+    assert conversation.message_count == 0
+    assert conversation.last_preview == ""

@@ -121,7 +121,11 @@ def add_message(
         try:
             next_sequence = db.execute(
                 sql_update(Conversation)
-                .where(Conversation.id == conversation.id, Conversation.message_count < max_messages)
+                .where(
+                    Conversation.id == conversation.id,
+                    Conversation.user_id == user_id,
+                    Conversation.message_count < max_messages,
+                )
                 .values(
                     message_count=Conversation.message_count + 1,
                     last_preview=" ".join(content.split())[:80],
