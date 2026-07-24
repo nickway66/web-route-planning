@@ -104,6 +104,65 @@ def test_workspace_rejects_payload_larger_than_five_mib(auth_client):
     assert response.status_code == 413
 
 
+def test_workspace_rejects_oversized_raw_body_even_when_json_is_small(auth_client):
+    payload = workspace_payload()
+    raw_body = __import__("json").dumps(payload) + (" " * (5 * 1024 * 1024))
+
+    response = auth_client.put("/api/workspace", content=raw_body, headers={"content-type": "application/json"})
+
+    assert response.status_code == 413
+
+
+def test_workspace_rejects_excessive_segments_and_segment_path_points(auth_client):
+    too_many_segments = workspace_payload()
+    too_many_segments["layers"][0]["routes"][0]["segments"] = [{"path": []}] * 201
+    too_many_path_points = workspace_payload()
+    too_many_path_points["layers"][0]["routes"][0]["segments"] = [{"path": [[121.49, 31.24]] * 501}]
+
+    assert auth_client.put("/api/workspace", json=too_many_segments).status_code == 413
+    assert auth_client.put("/api/workspace", json=too_many_path_points).status_code == 413
+
+
+def test_import_local_does_not_overwrite_a_competing_import(db_session, monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.models import User, Workspace
+    from backend.app.repositories import workspaces
+
+    user = User(email="race@example.com", password_hash="hash", display_name="race")
+    db_session.add(user)
+    db_session.flush()
+    db_session.add(Workspace(user_id=user.id, name="我的路线", layers_data=[]))
+    db_session.commit()
+
+    original_get = workspaces.get_by_user_id
+    raced = False
+
+    def get_then_allow_competing_import(session, user_id):
+        nonlocal raced
+        workspace = original_get(session, user_id)
+        if not raced:
+            raced = True
+            other_session = sessionmaker(bind=session.get_bind())()
+            try:
+                other = original_get(other_session, user_id)
+                other.layers_data = workspace_payload(layer_id="competing")["layers"]
+                other_session.commit()
+            finally:
+                other_session.close()
+        return workspace
+
+    monkeypatch.setattr(workspaces, "get_by_user_id", get_then_allow_competing_import)
+
+    with __import__("pytest").raises(workspaces.WorkspaceAlreadyExistsError):
+        workspaces.create_from_import_if_empty(
+            db_session, user_id=user.id, data_version=1, layers=workspace_payload()["layers"]
+        )
+
+    db_session.expire_all()
+    assert original_get(db_session, user.id).layers_data[0]["id"] == "competing"
+
+
 def test_import_local_only_creates_an_empty_workspace(auth_client):
     payload = workspace_payload()
 

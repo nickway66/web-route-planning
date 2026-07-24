@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -56,9 +56,27 @@ def create_from_import_if_empty(db: Session, *, user_id: str, data_version: int,
     workspace = get_by_user_id(db, user_id)
     if workspace is not None and workspace.layers_data:
         raise WorkspaceAlreadyExistsError
-    if workspace is not None:
-        return upsert_for_user(db, user_id=user_id, data_version=data_version, layers=layers)
     layer_count, route_count, point_count = _counts(layers)
+    if workspace is not None:
+        result = db.execute(
+            update(Workspace)
+            .where(Workspace.user_id == user_id, Workspace.layers_data == [])
+            .values(
+                data_version=data_version,
+                layers_data=layers,
+                layer_count=layer_count,
+                route_count=route_count,
+                point_count=point_count,
+            )
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            raise WorkspaceAlreadyExistsError
+        db.commit()
+        updated = get_by_user_id(db, user_id)
+        if updated is None:
+            raise RuntimeError("Workspace disappeared during import")
+        return updated
     workspace = Workspace(
         user_id=user_id,
         name="我的路线",

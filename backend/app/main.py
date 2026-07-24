@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
 from .schemas import AIBuildRequest, AIChatRequest, AIChatResponse, ExportRequest, PlanRouteRequest, PlanRouteResponse
@@ -9,6 +10,7 @@ from .services.exports import create_gpx, create_json
 from .services.routes import build_ai_layers, plan_route
 from .routers.auth import router as auth_router
 from .routers.workspace import router as workspace_router
+from .workspace_schemas import MAX_BODY_BYTES
 
 
 app = FastAPI(title="WEBMAP_VS Backend")
@@ -23,6 +25,15 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(workspace_router, prefix="/api/workspace", tags=["workspace"])
+
+
+@app.middleware("http")
+async def reject_oversized_workspace_body(request: Request, call_next):
+    if request.url.path.startswith("/api/workspace") and request.method in {"POST", "PUT"}:
+        body = await request.body()
+        if len(body) > MAX_BODY_BYTES:
+            return JSONResponse(status_code=413, content={"detail": "Workspace exceeds 5 MiB"})
+    return await call_next(request)
 
 
 def amap_client() -> AMapClient:

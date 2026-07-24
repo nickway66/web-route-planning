@@ -12,6 +12,8 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_LAYERS = 50
 MAX_ROUTES_PER_LAYER = 50
 MAX_POINTS_PER_ROUTE = 200
+MAX_SEGMENTS_PER_ROUTE = 200
+MAX_PATH_POINTS_PER_SEGMENT = 500
 
 
 class WorkspaceModel(BaseModel):
@@ -53,6 +55,8 @@ def validate_workspace_layers(layers: list[dict[str, Any]]) -> None:
                     raise ValueError(f"{route_path}.{required_key} must be an array")
             for required_key in ("stats", "meta"):
                 _require_object(route.get(required_key), f"{route_path}.{required_key}")
+            if len(route["segments"]) > MAX_SEGMENTS_PER_ROUTE:
+                raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Route has too many segments")
             points = route["points"]
             if len(points) > MAX_POINTS_PER_ROUTE:
                 raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Route has too many points")
@@ -62,7 +66,23 @@ def validate_workspace_layers(layers: list[dict[str, Any]]) -> None:
                 if not _is_number(point.get("lng")) or not _is_number(point.get("lat")):
                     raise ValueError(f"{point_path}.lng and {point_path}.lat must be numbers")
             for segment_index, segment in enumerate(route["segments"]):
-                _require_object(segment, f"{route_path}.segments[{segment_index}]")
+                segment_path = f"{route_path}.segments[{segment_index}]"
+                segment = _require_object(segment, segment_path)
+                if "path" not in segment:
+                    continue
+                path = segment["path"]
+                if not isinstance(path, list):
+                    raise ValueError(f"{segment_path}.path must be an array")
+                if len(path) > MAX_PATH_POINTS_PER_SEGMENT:
+                    raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Segment has too many path points")
+                for path_point_index, path_point in enumerate(path):
+                    if (
+                        not isinstance(path_point, list)
+                        or len(path_point) != 2
+                        or not _is_number(path_point[0])
+                        or not _is_number(path_point[1])
+                    ):
+                        raise ValueError(f"{segment_path}.path[{path_point_index}] must be a [lng, lat] pair")
 
 
 class WorkspaceWrite(WorkspaceModel):
