@@ -16,9 +16,17 @@ import {
   importAIConversations,
   initAIChatStore,
   listAIConversations,
-  renameAIConversation,
-  saveAIConversationMessages
+  saveAIConversationMessages,
+  updateAIConversation
 } from "./aiChatStore";
+import {
+  appendCloudMessage,
+  createCloudConversation,
+  deleteCloudConversation,
+  getCloudConversation,
+  listCloudConversations,
+  updateCloudConversation
+} from "./conversationApi";
 import { MapService } from "./mapService";
 import { loadHistoryRoutes, loadLayerState, removeHistoryRoute, saveLayerState, upsertHistoryRoute } from "./storage";
 import {
@@ -98,6 +106,9 @@ function loadAIChatMessages() {
 }
 
 function saveAIChatMessages(messages = []) {
+  if (isCloudConversationMode()) {
+    return;
+  }
   try {
     localStorage.setItem(AI_CHAT_STORAGE_KEY, JSON.stringify(messages));
   } catch (error) {
@@ -1178,6 +1189,8 @@ const state = {
   aiChatMessages: [],
   aiConversations: [],
   aiConversationId: "",
+  aiConversationLoading: false,
+  aiConversationError: "",
   aiHistoryOpen: false,
   aiRenamingConversationId: "",
   aiRouteNotice: null,
@@ -1798,25 +1811,34 @@ function hideFloatingTooltip() {
   tooltip.textContent = "";
 }
 
-function pushAIChatMessage(role, content, extras = {}) {
-  const normalizedInput = role === "assistant"
-    ? normalizeAIChatMessage({ role, content, ...extras }).normalized
-    : { role, content: String(content || "").trim(), ...extras };
+function isCloudConversationMode() {
+  return getAuthState().isAuthenticated;
+}
+
+function appendMessageToState(message, extras = {}) {
+  const normalizedInput = message.role === "assistant"
+    ? normalizeAIChatMessage({ ...message, ...extras }).normalized
+    : { ...message, content: String(message.content || "").trim(), ...extras };
   const text = String(normalizedInput.content || "").trim();
-  if (!text) {
-    return;
-  }
-  state.aiChatMessages.push({
-    id: createId("chat"),
+  if (!text) return null;
+  const storedMessage = {
+    id: normalizedInput.id || createId("chat"),
     role: normalizedInput.role,
     content: text,
-    createdAt: Date.now(),
+    createdAt: Number(normalizedInput.createdAt || Date.now()),
     ...normalizedInput
-  });
+  };
+  state.aiChatMessages.push(storedMessage);
   if (state.aiChatMessages.length > 80) {
     state.aiChatMessages = state.aiChatMessages.slice(-80);
   }
-  saveAIChatMessages(state.aiChatMessages);
+  return storedMessage;
+}
+
+function pushAIChatMessage(role, content, extras = {}) {
+  const message = appendMessageToState({ id: createId("chat"), role, content, createdAt: Date.now() }, extras);
+  if (message && !isCloudConversationMode()) saveAIChatMessages(state.aiChatMessages);
+  return message;
 }
 
 function clearPendingAIRouteActions() {
@@ -1836,18 +1858,32 @@ function clearPendingAIRouteActions() {
   }
 }
 
+function listCurrentAIConversations() {
+  return isCloudConversationMode() ? listCloudConversations() : listAIConversations();
+}
+
+function getCurrentAIConversation(id) {
+  return isCloudConversationMode() ? getCloudConversation(id) : getAIConversation(id);
+}
+
 function refreshAIConversations() {
-  return listAIConversations()
+  return listCurrentAIConversations()
     .then(async (conversations) => {
-      const normalizedConversations = await normalizeAllStoredAIConversations(conversations);
+      const normalizedConversations = isCloudConversationMode()
+        ? conversations
+        : await normalizeAllStoredAIConversations(conversations);
       state.aiConversations = normalizedConversations;
+      return normalizedConversations;
     })
     .catch((error) => {
       console.warn("刷新 AI 会话列表失败", error);
+      state.aiConversationError = error.message || "AI 对话同步失败";
+      return [];
     });
 }
 
 function persistCurrentAIConversation() {
+  if (isCloudConversationMode()) return Promise.resolve(null);
   return saveAIConversationMessages(state.aiConversationId, state.aiChatMessages)
     .then((conversation) => {
       state.aiConversationId = conversation.id;
@@ -1856,6 +1892,42 @@ function persistCurrentAIConversation() {
     .catch((error) => {
       console.warn("保存 AI 会话失败", error);
     });
+}
+
+async function ensureCloudConversation() {
+  if (!isCloudConversationMode()) return null;
+  if (state.aiConversationId) return state.aiConversationId;
+  const conversation = await createCloudConversation();
+  state.aiConversationId = conversation.id;
+  state.aiConversations = [conversation, ...state.aiConversations];
+  return conversation.id;
+}
+
+async function appendAIChatMessage(role, content, extras = {}) {
+  if (!isCloudConversationMode()) return pushAIChatMessage(role, content, extras);
+  const conversationId = await ensureCloudConversation();
+  const stored = await appendCloudMessage(conversationId, { role, content });
+  const message = appendMessageToState(stored, extras);
+  await refreshAIConversations();
+  return message;
+}
+
+async function createCurrentAIConversation() {
+  if (isCloudConversationMode()) return createCloudConversation();
+  return createAIConversation();
+}
+
+async function updateCurrentAIConversation(id, changes) {
+  if (isCloudConversationMode()) return updateCloudConversation(id, changes);
+  return updateAIConversation(id, changes);
+}
+
+async function deleteCurrentAIConversation(id) {
+  if (isCloudConversationMode()) {
+    await deleteCloudConversation(id);
+    return null;
+  }
+  return deleteAIConversation(id);
 }
 
 async function normalizeConversationMessagesIfNeeded(conversation, options = {}) {
@@ -1871,7 +1943,7 @@ async function normalizeConversationMessagesIfNeeded(conversation, options = {})
     };
   }
 
-  if (options.persist !== false) {
+  if (options.persist !== false && !isCloudConversationMode()) {
     await saveAIConversationMessages(conversation.id, result.messages);
   }
 
@@ -1887,6 +1959,49 @@ async function normalizeAllStoredAIConversations(conversations = []) {
     normalized.push(await normalizeConversationMessagesIfNeeded(conversation));
   }
   return normalized;
+}
+
+let aiConversationLoadGeneration = 0;
+
+async function switchAIConversationStore() {
+  const generation = ++aiConversationLoadGeneration;
+  state.aiConversationLoading = true;
+  state.aiConversationError = "";
+  state.aiHistoryOpen = false;
+  state.aiRenamingConversationId = "";
+  state.aiConversations = [];
+  state.aiConversationId = "";
+  state.aiChatMessages = [];
+  renderAIChatPanel();
+
+  try {
+    if (isCloudConversationMode()) {
+      const conversations = await listCloudConversations();
+      if (generation !== aiConversationLoadGeneration || !isCloudConversationMode()) return;
+      state.aiConversations = conversations;
+      const current = conversations[0] ? await getCloudConversation(conversations[0].id) : null;
+      if (generation !== aiConversationLoadGeneration || !isCloudConversationMode()) return;
+      state.aiConversationId = current?.id || "";
+      state.aiChatMessages = current ? normalizeAIChatMessages(current.messages).messages : [];
+    } else {
+      const localState = await initAIChatStore();
+      if (generation !== aiConversationLoadGeneration || isCloudConversationMode()) return;
+      state.aiConversations = await normalizeAllStoredAIConversations(localState.conversations);
+      state.aiConversationId = localState.currentConversationId;
+      state.aiChatMessages = normalizeAIChatMessages(localState.messages).messages;
+    }
+  } catch (error) {
+    if (generation !== aiConversationLoadGeneration) return;
+    state.aiConversations = [];
+    state.aiConversationId = "";
+    state.aiChatMessages = [];
+    state.aiConversationError = error.message || "AI 对话加载失败";
+  } finally {
+    if (generation === aiConversationLoadGeneration) {
+      state.aiConversationLoading = false;
+      renderAIChatPanel();
+    }
+  }
 }
 
 function getEditorOverlayOpenState() {
@@ -1906,12 +2021,11 @@ async function submitAIChat() {
     return;
   }
 
-  input.value = "";
-  pushAIChatMessage("user", question);
-  state.aiChatPending = true;
-  renderAIChatPanel();
-
   try {
+    input.value = "";
+    await appendAIChatMessage("user", question);
+    state.aiChatPending = true;
+    renderAIChatPanel();
     const response = normalizeAIChatResponse(await chatWithAI(state.aiChatMessages));
     const answer = response.reply || "";
     const plan = response.plan || null;
@@ -1920,11 +2034,11 @@ async function submitAIChat() {
       const dayPlans = routeMeta.routeDayPlans;
       const places = routeMeta.routePlaces;
       if (places.length < 2) {
-        pushAIChatMessage("assistant", answer);
+        await appendAIChatMessage("assistant", answer);
         return;
       }
       const assistantContent = answer;
-      pushAIChatMessage("assistant", assistantContent, {
+      await appendAIChatMessage("assistant", assistantContent, {
         routePlaces: places,
         routeDayPlans: dayPlans,
         routeTargetCity: routeMeta.routeTargetCity,
@@ -1932,12 +2046,12 @@ async function submitAIChat() {
       });
     } else if (response.type === "cancel_or_negative") {
       clearPendingAIRouteActions();
-      pushAIChatMessage("assistant", answer);
+      await appendAIChatMessage("assistant", answer);
     } else {
-      pushAIChatMessage("assistant", answer);
+      await appendAIChatMessage("assistant", answer);
     }
   } catch (error) {
-    pushAIChatMessage("assistant", `请求失败：${error.message || "未知错误"}`);
+    setToast(error.message || "AI 请求失败，已保留已发送的问题", "danger");
   } finally {
     state.aiChatPending = false;
     renderAIChatPanel();
@@ -1991,6 +2105,21 @@ async function handleAIChatAction(event) {
       return;
     }
 
+    if (isCloudConversationMode()) {
+      try {
+        if (state.aiConversationId) await deleteCloudConversation(state.aiConversationId);
+        const conversation = await createCloudConversation();
+        state.aiConversationId = conversation.id;
+        state.aiChatMessages = [];
+        await refreshAIConversations();
+        renderAIChatPanel();
+        setToast("当前云端对话已清空", "success");
+      } catch (error) {
+        setToast(error.message || "清空云端对话失败", "danger");
+      }
+      return;
+    }
+
     state.aiChatMessages = [];
     saveAIChatMessages(state.aiChatMessages);
     renderAIChatPanel();
@@ -2006,7 +2135,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "new-conversation") {
-    const conversation = await createAIConversation();
+    const conversation = await createCurrentAIConversation();
     state.aiConversationId = conversation.id;
     state.aiChatMessages = [];
     state.aiHistoryOpen = true;
@@ -2017,7 +2146,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "select-conversation") {
-    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId));
+    const conversation = await normalizeConversationMessagesIfNeeded(await getCurrentAIConversation(target.dataset.conversationId));
     if (!conversation) {
       setToast("未找到该对话", "warning");
       return;
@@ -2030,7 +2159,7 @@ async function handleAIChatAction(event) {
   }
 
   if (action === "rename-conversation") {
-    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId), { persist: false });
+    const conversation = await normalizeConversationMessagesIfNeeded(await getCurrentAIConversation(target.dataset.conversationId), { persist: false });
     if (!conversation) {
       return;
     }
@@ -2038,7 +2167,7 @@ async function handleAIChatAction(event) {
       const input = document.querySelector(`[data-ai-rename-input="${state.aiRenamingConversationId}"]`);
       const previousTitle = input?.value?.trim();
       if (previousTitle) {
-        await renameAIConversation(state.aiRenamingConversationId, previousTitle);
+        await updateCurrentAIConversation(state.aiRenamingConversationId, { title: previousTitle });
         state.aiConversations = state.aiConversations.map((item) =>
           item.id === state.aiRenamingConversationId ? { ...item, title: previousTitle } : item
         );
@@ -2065,7 +2194,7 @@ async function handleAIChatAction(event) {
     const input = document.querySelector(`[data-ai-rename-input="${conversationId}"]`);
     const nextTitle = input?.value?.trim();
     if (nextTitle) {
-      await renameAIConversation(conversationId, nextTitle);
+      await updateCurrentAIConversation(conversationId, { title: nextTitle });
       state.aiConversations = state.aiConversations.map((conversation) =>
         conversation.id === conversationId ? { ...conversation, title: nextTitle } : conversation
       );
@@ -2075,8 +2204,20 @@ async function handleAIChatAction(event) {
     return;
   }
 
+  if (action === "toggle-pin-conversation" || action === "toggle-archive-conversation") {
+    const conversationId = target.dataset.conversationId;
+    const conversation = state.aiConversations.find((item) => item.id === conversationId);
+    if (!conversation) return;
+    const field = action === "toggle-pin-conversation" ? "pinned" : "archived";
+    const updated = await updateCurrentAIConversation(conversationId, { [field]: !conversation[field] });
+    state.aiConversations = state.aiConversations.map((item) => item.id === conversationId ? { ...item, ...updated } : item);
+    await refreshAIConversations();
+    renderAIChatPanel();
+    return;
+  }
+
   if (action === "delete-conversation") {
-    const conversation = await normalizeConversationMessagesIfNeeded(await getAIConversation(target.dataset.conversationId), { persist: false });
+    const conversation = await normalizeConversationMessagesIfNeeded(await getCurrentAIConversation(target.dataset.conversationId), { persist: false });
     if (!conversation) {
       return;
     }
@@ -2084,21 +2225,37 @@ async function handleAIChatAction(event) {
     if (!ok) {
       return;
     }
-    const next = await deleteAIConversation(conversation.id);
-    state.aiConversationId = next.id;
-    state.aiChatMessages = normalizeAIChatMessages(next.messages).messages;
-    await refreshAIConversations();
+    const next = await deleteCurrentAIConversation(conversation.id);
+    const remaining = await refreshAIConversations();
+    const nextConversation = next || remaining[0] || null;
+    state.aiConversationId = nextConversation?.id || "";
+    state.aiChatMessages = nextConversation
+      ? normalizeAIChatMessages((await getCurrentAIConversation(nextConversation.id)).messages).messages
+      : [];
     renderAIChatPanel();
     return;
   }
 
   if (action === "export-conversations") {
+    if (isCloudConversationMode()) {
+      const summaries = await listCloudConversations();
+      const conversations = await Promise.all(summaries.map((conversation) => getCloudConversation(conversation.id)));
+      downloadBlob(
+        new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), conversations }, null, 2)], { type: "application/json" }),
+        "webmap_ai_conversations.json"
+      );
+      return;
+    }
     const payload = await exportAIConversations();
     downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }), "webmap_ai_conversations.json");
     return;
   }
 
   if (action === "import-conversations") {
+    if (isCloudConversationMode()) {
+      setToast("云端模式不会导入或合并本地 AI 对话", "info");
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "application/json,.json";
@@ -2129,6 +2286,19 @@ async function handleAIChatAction(event) {
   if (action === "clear-all-conversations") {
     const ok = window.confirm("确认清空全部 AI 对话历史吗？此操作不可恢复。");
     if (!ok) {
+      return;
+    }
+    if (isCloudConversationMode()) {
+      try {
+        await Promise.all(state.aiConversations.map((conversation) => deleteCloudConversation(conversation.id)));
+        state.aiConversationId = "";
+        state.aiChatMessages = [];
+        state.aiConversations = [];
+        renderAIChatPanel();
+        setToast("全部云端 AI 对话已清空", "success");
+      } catch (error) {
+        setToast(error.message || "清空云端 AI 对话失败", "danger");
+      }
       return;
     }
     const conversation = await clearAIConversations();
@@ -2580,6 +2750,11 @@ function renderAIChatPanel() {
     : '<p class="muted ai-chat-empty">你好，我是你的路线助手。你可以问我路线规划、景点安排、出行建议等问题。</p>';
   const currentConversation = state.aiConversations.find((item) => item.id === state.aiConversationId);
   const conversationTitle = currentConversation?.title || "新对话";
+  const conversationSyncHint = state.aiConversationLoading
+    ? '<p class="muted">正在加载云端 AI 对话…</p>'
+    : state.aiConversationError
+      ? `<p class="muted">${escapeHtml(state.aiConversationError)}；本地历史未被修改。</p>`
+      : "";
   const orderedAIConversations = [...state.aiConversations];
   const historyHtml = state.aiHistoryOpen
     ? `
@@ -2625,6 +2800,8 @@ function renderAIChatPanel() {
                               ? `<button data-ai-action="save-rename-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="保存名称" aria-label="保存名称">✓</button>`
                               : `<button data-ai-action="rename-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="重命名对话" aria-label="重命名对话">✎</button>`
                           }
+                          <button data-ai-action="toggle-pin-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="${conversation.pinned ? "取消置顶" : "置顶对话"}" aria-label="${conversation.pinned ? "取消置顶" : "置顶对话"}">${conversation.pinned ? "★" : "☆"}</button>
+                          <button data-ai-action="toggle-archive-conversation" data-conversation-id="${conversation.id}" class="icon-btn" type="button" title="${conversation.archived ? "取消归档" : "归档对话"}" aria-label="${conversation.archived ? "取消归档" : "归档对话"}">${conversation.archived ? "↩" : "⌑"}</button>
                           <button data-ai-action="delete-conversation" data-conversation-id="${conversation.id}" class="icon-btn delete" type="button" title="删除对话" aria-label="删除对话">×</button>
                         </div>
                       </article>
@@ -2654,6 +2831,7 @@ function renderAIChatPanel() {
       </div>
     </div>
     ${historyHtml}
+    ${conversationSyncHint}
 
     <div class="ai-chat-body">
       <section class="panel-block ai-chat-thread-block">
@@ -5012,6 +5190,7 @@ async function boot() {
     const auth = getAuthState();
     const userId = auth.isAuthenticated ? String(auth.user?.id || "") : "";
     switchLayerCache(userId);
+    void switchAIConversationStore();
     renderAuthEntry();
   });
   applyThemeMode(state.themeMode, false);
