@@ -74,6 +74,8 @@ def create_conversation(payload: ConversationCreate, current_user: CurrentUser, 
         )
     except conversations.ConversationLimitReached as error:
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation limit reached")
+    except conversations.ConcurrentWriteConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrent conversation update") from error
     return summary_for(conversation)
 
 
@@ -95,12 +97,17 @@ def create_message(conversation_id: str, payload: MessageCreate, current_user: C
         message = conversations.add_message(
             db,
             conversation=conversation,
+            user_id=current_user.id,
             role=payload.role,
             content=payload.content,
             max_messages=MAX_MESSAGES_PER_CONVERSATION,
         )
     except conversations.MessageLimitReached as error:
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Message limit reached")
+    except conversations.ConversationNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found") from error
+    except conversations.ConcurrentWriteConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Concurrent conversation update") from error
     return message_for(message)
 
 

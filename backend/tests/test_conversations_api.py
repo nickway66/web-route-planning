@@ -116,7 +116,7 @@ def test_concurrent_message_adds_allocate_distinct_sequences(db_session):
             owned = conversations.get_for_user(session, conversation_id=conversation_id, user_id=user_id)
             barrier.wait()
             return conversations.add_message(
-                session, conversation=owned, role="user", content=content, max_messages=1000
+                session, conversation=owned, user_id=user_id, role="user", content=content, max_messages=1000
             ).sequence
         finally:
             session.close()
@@ -169,3 +169,57 @@ def test_concurrent_creates_honor_the_conversation_cap(db_session):
 
     assert outcomes.count("limited") == 1
     assert conversations.count_for_user(db_session, user_id) == 1
+
+
+def test_message_racing_with_delete_is_not_misreported_as_a_limit(db_session):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.models import Conversation, User
+    from backend.app.repositories import conversations
+
+    user = User(email="delete-race@example.com", password_hash="hash", display_name="delete-race")
+    db_session.add(user)
+    db_session.flush()
+    conversation = Conversation(user_id=user.id, title="Delete race", city="")
+    db_session.add(conversation)
+    db_session.commit()
+    conversation_id = conversation.id
+    user_id = user.id
+    barrier = Barrier(2)
+    sessions = sessionmaker(bind=db_session.get_bind())
+
+    def add():
+        session = sessions()
+        try:
+            owned = conversations.get_for_user(session, conversation_id=conversation_id, user_id=user_id)
+            barrier.wait()
+            try:
+                conversations.add_message(
+                    session, conversation=owned, user_id=user_id, role="user", content="racing", max_messages=1
+                )
+                return "created"
+            except conversations.ConversationNotFound:
+                return "not_found"
+        finally:
+            session.close()
+
+    def delete():
+        session = sessions()
+        try:
+            owned = conversations.get_for_user(session, conversation_id=conversation_id, user_id=user_id)
+            barrier.wait()
+            conversations.delete(session, owned)
+            return "deleted"
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        added, deleted = executor.submit(add), executor.submit(delete)
+        assert added.result() in {"created", "not_found"}
+        assert deleted.result() == "deleted"
+
+    db_session.expire_all()
+    assert conversations.get_for_user(db_session, conversation_id=conversation_id, user_id=user_id) is None

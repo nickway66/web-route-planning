@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from sqlalchemy import func, insert, literal, select, update as sql_update
+import time
+
+from sqlalchemy import func, insert, select, update as sql_update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, selectinload
 
-from backend.app.models import ChatMessage, Conversation
+from backend.app.models import ChatMessage, Conversation, User
 from backend.app.models.user import generate_uuid, utc_now
 
 
@@ -13,6 +16,19 @@ class ConversationLimitReached(Exception):
 
 class MessageLimitReached(Exception):
     pass
+
+
+class ConversationNotFound(Exception):
+    pass
+
+
+class ConcurrentWriteConflict(Exception):
+    pass
+
+
+def _is_retryable_contention(error: OperationalError) -> bool:
+    message = str(error).lower()
+    return "database is locked" in message or "could not serialize" in message or "deadlock detected" in message
 
 
 def list_for_user(db: Session, user_id: str) -> list[Conversation]:
@@ -35,30 +51,33 @@ def get_for_user(db: Session, *, conversation_id: str, user_id: str, include_mes
 def create_for_user(
     db: Session, *, user_id: str, title: str, city: str, max_conversations: int
 ) -> Conversation:
-    """Create only when the per-user cap is still available in this SQL statement."""
-    conversation_id = generate_uuid()
-    now = utc_now()
-    under_limit = select(func.count()).select_from(Conversation).where(Conversation.user_id == user_id).scalar_subquery() < max_conversations
-    result = db.execute(
-        insert(Conversation).from_select(
-            [
-                "id", "user_id", "title", "city", "pinned", "archived", "route_count", "message_count",
-                "last_preview", "created_at", "updated_at",
-            ],
-            select(
-                literal(conversation_id), literal(user_id), literal(title), literal(city), literal(False), literal(False),
-                literal(0), literal(0), literal(""), literal(now), literal(now),
-            ).where(under_limit),
-        )
-    )
-    if result.rowcount != 1:
-        db.rollback()
-        raise ConversationLimitReached
-    db.commit()
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None:
-        raise RuntimeError("Conversation disappeared after creation")
-    return conversation
+    """Acquire the owner's write lock before checking the quota.
+
+    PostgreSQL locks this one user row; SQLite serializes writers, where
+    ``SELECT FOR UPDATE`` alone is intentionally a no-op.
+    """
+    for attempt in range(3):
+        try:
+            lock_result = db.execute(
+                sql_update(User).where(User.id == user_id).values(id=User.id)
+            )
+            if lock_result.rowcount != 1:
+                db.rollback()
+                raise ConversationNotFound
+            if count_for_user(db, user_id) >= max_conversations:
+                db.rollback()
+                raise ConversationLimitReached
+            conversation = Conversation(user_id=user_id, title=title, city=city)
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+            return conversation
+        except OperationalError as error:
+            db.rollback()
+            if not _is_retryable_contention(error) or attempt == 2:
+                raise ConcurrentWriteConflict from error
+            time.sleep(0.01 * (attempt + 1))
+    raise RuntimeError("unreachable")
 
 
 def count_for_user(db: Session, user_id: str) -> int:
@@ -80,42 +99,49 @@ def update(conversation: Conversation, *, title: str | None, city: str | None, p
 
 
 def add_message(
-    db: Session, *, conversation: Conversation, role: str, content: str, max_messages: int
+    db: Session, *, conversation: Conversation, user_id: str, role: str, content: str, max_messages: int
 ) -> ChatMessage:
     """Persist a message and all denormalized conversation fields in one transaction."""
-    next_sequence = db.execute(
-        sql_update(Conversation)
-        .where(Conversation.id == conversation.id, Conversation.message_count < max_messages)
-        .values(
-            message_count=Conversation.message_count + 1,
-            last_preview=content[:500],
-            updated_at=func.now(),
-        )
-        .returning(Conversation.message_count)
-    ).scalar_one_or_none()
-    if next_sequence is None:
-        db.rollback()
-        raise MessageLimitReached
-    message_id = generate_uuid()
-    db.execute(
-        insert(ChatMessage).values(
-            id=message_id,
-            conversation_id=conversation.id,
-            role=role,
-            content=content,
-            sequence=next_sequence,
-            created_at=utc_now(),
-        )
-    )
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    message = db.get(ChatMessage, message_id)
-    if message is None:
-        raise RuntimeError("Message disappeared after creation")
-    return message
+    for attempt in range(3):
+        try:
+            next_sequence = db.execute(
+                sql_update(Conversation)
+                .where(Conversation.id == conversation.id, Conversation.message_count < max_messages)
+                .values(
+                    message_count=Conversation.message_count + 1,
+                    last_preview=content[:500],
+                    updated_at=func.now(),
+                )
+                .returning(Conversation.message_count)
+            ).scalar_one_or_none()
+            if next_sequence is None:
+                still_owned = get_for_user(db, conversation_id=conversation.id, user_id=user_id)
+                db.rollback()
+                if still_owned is None:
+                    raise ConversationNotFound
+                raise MessageLimitReached
+            message_id = generate_uuid()
+            db.execute(
+                insert(ChatMessage).values(
+                    id=message_id,
+                    conversation_id=conversation.id,
+                    role=role,
+                    content=content,
+                    sequence=next_sequence,
+                    created_at=utc_now(),
+                )
+            )
+            db.commit()
+            message = db.get(ChatMessage, message_id)
+            if message is None:
+                raise RuntimeError("Message disappeared after creation")
+            return message
+        except OperationalError as error:
+            db.rollback()
+            if not _is_retryable_contention(error) or attempt == 2:
+                raise ConcurrentWriteConflict from error
+            time.sleep(0.01 * (attempt + 1))
+    raise RuntimeError("unreachable")
 
 
 def delete(db: Session, conversation: Conversation) -> None:
