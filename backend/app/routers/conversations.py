@@ -86,8 +86,15 @@ def get_conversation(conversation_id: str, current_user: CurrentUser, db: DbSess
 
 @router.patch("/{conversation_id}", response_model=ConversationSummary)
 def update_conversation(conversation_id: str, payload: ConversationUpdate, current_user: CurrentUser, db: DbSession) -> ConversationSummary:
-    conversation = find_or_404(db, current_user, conversation_id)
-    return summary_for(conversations.update(conversation, db=db, **payload.model_dump()))
+    conversation = conversations.update(
+        db,
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+        **payload.model_dump(),
+    )
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    return summary_for(conversation)
 
 
 @router.post("/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
@@ -113,5 +120,6 @@ def create_message(conversation_id: str, payload: MessageCreate, current_user: C
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_conversation(conversation_id: str, current_user: CurrentUser, db: DbSession) -> Response:
-    conversations.delete(db, find_or_404(db, current_user, conversation_id))
+    if not conversations.delete(db, conversation_id=conversation_id, user_id=current_user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

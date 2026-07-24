@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import func, insert, select, update as sql_update
+from sqlalchemy import delete as sql_delete, func, insert, select, update as sql_update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, selectinload
 
@@ -74,7 +74,9 @@ def create_for_user(
             return conversation
         except OperationalError as error:
             db.rollback()
-            if not _is_retryable_contention(error) or attempt == 2:
+            if not _is_retryable_contention(error):
+                raise
+            if attempt == 2:
                 raise ConcurrentWriteConflict from error
             time.sleep(0.01 * (attempt + 1))
     raise RuntimeError("unreachable")
@@ -84,17 +86,30 @@ def count_for_user(db: Session, user_id: str) -> int:
     return db.scalar(select(func.count()).select_from(Conversation).where(Conversation.user_id == user_id)) or 0
 
 
-def update(conversation: Conversation, *, title: str | None, city: str | None, pinned: bool | None, archived: bool | None, db: Session) -> Conversation:
-    if title is not None:
-        conversation.title = title
-    if city is not None:
-        conversation.city = city
-    if pinned is not None:
-        conversation.pinned = pinned
-    if archived is not None:
-        conversation.archived = archived
+def update(
+    db: Session, *, conversation_id: str, user_id: str, title: str | None, city: str | None,
+    pinned: bool | None, archived: bool | None,
+) -> Conversation | None:
+    values = {
+        key: value
+        for key, value in {"title": title, "city": city, "pinned": pinned, "archived": archived}.items()
+        if value is not None
+    }
+    if not values:
+        return get_for_user(db, conversation_id=conversation_id, user_id=user_id)
+    values["updated_at"] = func.now()
+    result = db.execute(
+        sql_update(Conversation)
+        .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return None
     db.commit()
-    db.refresh(conversation)
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        return None
     return conversation
 
 
@@ -109,7 +124,7 @@ def add_message(
                 .where(Conversation.id == conversation.id, Conversation.message_count < max_messages)
                 .values(
                     message_count=Conversation.message_count + 1,
-                    last_preview=content[:500],
+                    last_preview=" ".join(content.split())[:80],
                     updated_at=func.now(),
                 )
                 .returning(Conversation.message_count)
@@ -138,12 +153,20 @@ def add_message(
             return message
         except OperationalError as error:
             db.rollback()
-            if not _is_retryable_contention(error) or attempt == 2:
+            if not _is_retryable_contention(error):
+                raise
+            if attempt == 2:
                 raise ConcurrentWriteConflict from error
             time.sleep(0.01 * (attempt + 1))
     raise RuntimeError("unreachable")
 
 
-def delete(db: Session, conversation: Conversation) -> None:
-    db.delete(conversation)
+def delete(db: Session, *, conversation_id: str, user_id: str) -> bool:
+    result = db.execute(
+        sql_delete(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return False
     db.commit()
+    return True

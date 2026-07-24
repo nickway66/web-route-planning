@@ -211,7 +211,7 @@ def test_message_racing_with_delete_is_not_misreported_as_a_limit(db_session):
         try:
             owned = conversations.get_for_user(session, conversation_id=conversation_id, user_id=user_id)
             barrier.wait()
-            conversations.delete(session, owned)
+            conversations.delete(session, conversation_id=owned.id, user_id=user_id)
             return "deleted"
         finally:
             session.close()
@@ -223,3 +223,65 @@ def test_message_racing_with_delete_is_not_misreported_as_a_limit(db_session):
 
     db_session.expire_all()
     assert conversations.get_for_user(db_session, conversation_id=conversation_id, user_id=user_id) is None
+
+
+def test_last_preview_collapses_whitespace_and_is_limited_to_eighty_characters(auth_client):
+    conversation_id = create_conversation(auth_client).json()["id"]
+    content = "  first\n\tsecond   " + ("x" * 100)
+
+    response = auth_client.post(
+        f"/api/conversations/{conversation_id}/messages", json={"role": "user", "content": content}
+    )
+    detail = auth_client.get(f"/api/conversations/{conversation_id}")
+
+    assert response.status_code == 201
+    assert detail.json()["lastPreview"] == ("first second " + ("x" * 100))[:80]
+    assert len(detail.json()["lastPreview"]) == 80
+
+
+def test_repository_update_and_delete_are_scoped_to_the_owner(db_session):
+    from backend.app.models import Conversation, User
+    from backend.app.repositories import conversations
+
+    owner = User(email="owner-scope@example.com", password_hash="hash", display_name="owner")
+    other = User(email="other-scope@example.com", password_hash="hash", display_name="other")
+    db_session.add_all([owner, other])
+    db_session.flush()
+    conversation = Conversation(user_id=owner.id, title="Private", city="")
+    db_session.add(conversation)
+    db_session.commit()
+
+    assert conversations.update(
+        db_session, conversation_id=conversation.id, user_id=other.id, title="Hijacked", city=None, pinned=None, archived=None
+    ) is None
+    assert conversations.delete(db_session, conversation_id=conversation.id, user_id=other.id) is False
+    db_session.refresh(conversation)
+    assert conversation.title == "Private"
+
+    updated = conversations.update(
+        db_session, conversation_id=conversation.id, user_id=owner.id, title="Renamed", city=None, pinned=None, archived=None
+    )
+    assert updated.title == "Renamed"
+    assert conversations.delete(db_session, conversation_id=conversation.id, user_id=owner.id) is True
+
+
+def test_non_contention_database_error_is_not_translated_to_a_conflict(db_session, monkeypatch):
+    import pytest
+    from sqlalchemy.exc import OperationalError
+
+    from backend.app.models import User
+    from backend.app.repositories import conversations
+
+    user = User(email="db-error@example.com", password_hash="hash", display_name="db-error")
+    db_session.add(user)
+    db_session.commit()
+    user_id = user.id
+    database_error = OperationalError("UPDATE users", {}, RuntimeError("connection reset"))
+
+    def raise_database_error(*args, **kwargs):
+        raise database_error
+
+    monkeypatch.setattr(db_session, "execute", raise_database_error)
+    with pytest.raises(OperationalError) as raised:
+        conversations.create_for_user(db_session, user_id=user_id, title="Will fail", city="", max_conversations=1)
+    assert raised.value is database_error
