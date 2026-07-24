@@ -1,3 +1,8 @@
+import sqlite3
+
+from sqlalchemy.exc import IntegrityError
+
+
 def test_register_normalizes_email_and_hides_password_hash(client):
     response = client.post(
         "/api/auth/register",
@@ -18,6 +23,33 @@ def test_register_rejects_duplicate_email(client):
     response = client.post("/api/auth/register", json={**payload, "email": "USER@example.com"})
 
     assert response.status_code == 409
+
+
+def test_register_returns_conflict_and_rolls_back_when_email_unique_constraint_races(client, db_session, monkeypatch):
+    rollback_called = False
+    original_rollback = db_session.rollback
+
+    def raise_duplicate_email_error():
+        raise IntegrityError(
+            "INSERT INTO users ...",
+            {},
+            sqlite3.IntegrityError("UNIQUE constraint failed: users.email"),
+        )
+
+    def record_rollback():
+        nonlocal rollback_called
+        rollback_called = True
+        original_rollback()
+
+    monkeypatch.setattr(db_session, "commit", raise_duplicate_email_error)
+    monkeypatch.setattr(db_session, "rollback", record_rollback)
+    response = client.post(
+        "/api/auth/register",
+        json={"email": "racing@example.com", "password": "correct-horse-42"},
+    )
+
+    assert response.status_code == 409
+    assert rollback_called is True
 
 
 def test_register_validates_email_and_password_length(client):

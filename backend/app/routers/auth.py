@@ -7,7 +7,7 @@ from backend.app.auth_schemas import LoginRequest, RegisterRequest, TokenRespons
 from backend.app.database import get_db
 from backend.app.dependencies.auth import get_current_user
 from backend.app.models import User
-from backend.app.repositories.users import create_user, get_user_by_email
+from backend.app.repositories.users import DuplicateEmailError, create_user, get_user_by_email
 from backend.app.security import create_access_token, hash_password, verify_password
 
 
@@ -29,12 +29,15 @@ def user_response(user: User) -> UserResponse:
 def register(payload: RegisterRequest, db: DbSession) -> UserResponse:
     if get_user_by_email(db, str(payload.email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-    user = create_user(
-        db,
-        email=str(payload.email),
-        password_hash=hash_password(payload.password),
-        display_name=str(payload.email).split("@", 1)[0],
-    )
+    try:
+        user = create_user(
+            db,
+            email=str(payload.email),
+            password_hash=hash_password(payload.password),
+            display_name=str(payload.email).split("@", 1)[0],
+        )
+    except DuplicateEmailError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered") from error
     return user_response(user)
 
 
