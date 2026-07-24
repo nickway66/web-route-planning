@@ -3,7 +3,9 @@ import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
 import Sortable from "sortablejs";
 import { AMAP_KEY, AMAP_SECURITY_CODE } from "./config";
-import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI } from "./apiClient";
+import { buildAIRoutes, chatWithAI, exportRouteData, getSearchSuggestions as requestSearchSuggestions, planRoute, searchPOI as requestSearchPOI, setUnauthorizedHandler } from "./apiClient";
+import { login, register } from "./authApi";
+import { clearAuthSession, getAuthState, setAuthSession, subscribeAuth } from "./authStore";
 import {
   clearAIConversations,
   createAIConversation,
@@ -1182,7 +1184,9 @@ const state = {
   mobileLeftOpen: false,
   mobileRightOpen: false,
   pointSortable: null,
-  pendingPointOrders: {}
+  pendingPointOrders: {},
+  authDialogMode: "",
+  authPending: false
 };
 
 function createEmptyDraft() {
@@ -2632,6 +2636,74 @@ function renderAIChatPanel() {
   }
 }
 
+function renderAuthEntry() {
+  const container = document.getElementById("auth-entry");
+  if (!container) {
+    return;
+  }
+  const auth = getAuthState();
+  if (auth.isAuthenticated) {
+    const name = escapeHtml(auth.user?.displayName || auth.user?.email || "已登录用户");
+    container.innerHTML = `<span class="auth-user" title="${name}">${name}</span><button data-auth-action="logout" class="btn ghost" type="button">退出</button>`;
+    return;
+  }
+  container.innerHTML = `<button data-auth-action="login" class="btn ghost" type="button">登录</button><button data-auth-action="register" class="btn soft" type="button">注册</button>`;
+}
+
+function renderAuthDialog() {
+  const dialog = document.getElementById("auth-dialog");
+  if (!dialog) {
+    return;
+  }
+  if (!state.authDialogMode) {
+    dialog.className = "auth-dialog hidden";
+    dialog.innerHTML = "";
+    return;
+  }
+  const isRegister = state.authDialogMode === "register";
+  dialog.className = "auth-dialog";
+  dialog.innerHTML = `
+    <form class="auth-card" data-auth-form="${state.authDialogMode}">
+      <button data-auth-action="close" class="icon-tool-btn auth-close" type="button" aria-label="关闭">×</button>
+      <h2>${isRegister ? "创建账户" : "登录账户"}</h2>
+      <p>${isRegister ? "注册后可在设备间同步路线和会话。" : "登录后可恢复你的云端路线和会话。"}</p>
+      <label>邮箱<input name="email" type="email" required autocomplete="email" /></label>
+      <label>密码<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="${isRegister ? "new-password" : "current-password"}" /></label>
+      <div class="auth-error" data-auth-error></div>
+      <button class="btn primary" type="submit" ${state.authPending ? "disabled" : ""}>${state.authPending ? "处理中…" : isRegister ? "注册并登录" : "登录"}</button>
+      <button data-auth-action="switch" class="btn ghost" type="button">${isRegister ? "已有账户？去登录" : "没有账户？去注册"}</button>
+    </form>`;
+}
+
+function openAuthDialog(mode) {
+  state.authDialogMode = mode;
+  state.authPending = false;
+  renderAuthDialog();
+}
+
+async function handleAuthSubmit(form) {
+  const data = new FormData(form);
+  const payload = { email: String(data.get("email") || "").trim(), password: String(data.get("password") || "") };
+  state.authPending = true;
+  renderAuthDialog();
+  try {
+    if (state.authDialogMode === "register") {
+      await register(payload);
+    }
+    const response = await login(payload);
+    setAuthSession(response);
+    state.authDialogMode = "";
+    state.authPending = false;
+    renderAuthDialog();
+    setToast("登录成功", "success");
+  } catch (error) {
+    state.authPending = false;
+    renderAuthDialog();
+    const errorNode = document.querySelector("[data-auth-error]");
+    if (errorNode) errorNode.textContent = error.message || "认证失败，请稍后重试。";
+  }
+}
+
 function buildLayout() {
   app.innerHTML = `
     <div class="app-shell">
@@ -2654,6 +2726,7 @@ function buildLayout() {
           </section>
           <div class="top-actions">
             <button id="show-history-btn" class="btn ghost" type="button">历史路线</button>
+            <div id="auth-entry" class="auth-entry"></div>
           </div>
         </div>
 
@@ -2673,7 +2746,9 @@ function buildLayout() {
     </div>
 
     <section id="history-overlay" class="history-overlay hidden"></section>
+    <section id="auth-dialog" class="auth-dialog hidden"></section>
   `;
+  renderAuthEntry();
 }
 
 function getDraftPoints() {
@@ -4680,6 +4755,8 @@ function bindEvents() {
   const aiRouteNotice = document.getElementById("ai-route-notice");
   const leftMobileBtn = document.getElementById("toggle-left-btn");
   const rightMobileBtn = document.getElementById("toggle-right-btn");
+  const authEntry = document.getElementById("auth-entry");
+  const authDialog = document.getElementById("auth-dialog");
 
   leftPanel.addEventListener("click", handleLeftPanelAction);
   leftPanel.addEventListener("change", handleLeftPanelAction);
@@ -4772,6 +4849,30 @@ function bindEvents() {
   });
 
   historyOverlay.addEventListener("click", handleHistoryAction);
+  authEntry?.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-auth-action]")?.dataset.authAction;
+    if (action === "logout") {
+      clearAuthSession();
+      setToast("已退出登录，本地路线和历史记录保持不变。", "success");
+      return;
+    }
+    if (action === "login" || action === "register") openAuthDialog(action);
+  });
+  authDialog?.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-auth-action]")?.dataset.authAction;
+    if (action === "close") {
+      state.authDialogMode = "";
+      renderAuthDialog();
+    } else if (action === "switch") {
+      openAuthDialog(state.authDialogMode === "login" ? "register" : "login");
+    }
+  });
+  authDialog?.addEventListener("submit", (event) => {
+    const form = event.target.closest("[data-auth-form]");
+    if (!form) return;
+    event.preventDefault();
+    handleAuthSubmit(form);
+  });
   aiRouteNotice?.addEventListener("click", (event) => {
     const target = event.target.closest("[data-action='close-ai-route-notice']");
     if (!target || !aiRouteNotice.contains(target)) {
@@ -4843,6 +4944,13 @@ async function boot() {
   persistLayersState();
 
   buildLayout();
+  setUnauthorizedHandler(() => {
+    if (getAuthState().isAuthenticated) {
+      clearAuthSession();
+      setToast("登录已失效，请重新登录。", "warning");
+    }
+  });
+  subscribeAuth(() => renderAuthEntry());
   applyThemeMode(state.themeMode, false);
   renderLeftPanel();
   renderRightPanel();
