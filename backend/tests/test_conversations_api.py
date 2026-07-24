@@ -88,3 +88,84 @@ def test_conversation_count_is_limited(auth_client, monkeypatch):
     monkeypatch.setattr(conversations, "MAX_CONVERSATIONS_PER_USER", 1)
     assert create_conversation(auth_client).status_code == 201
     assert create_conversation(auth_client, title="Another").status_code == 413
+
+
+def test_concurrent_message_adds_allocate_distinct_sequences(db_session):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.models import Conversation, User
+    from backend.app.repositories import conversations
+
+    user = User(email="concurrent@example.com", password_hash="hash", display_name="concurrent")
+    db_session.add(user)
+    db_session.flush()
+    conversation = Conversation(user_id=user.id, title="Concurrent", city="")
+    db_session.add(conversation)
+    db_session.commit()
+    conversation_id = conversation.id
+    user_id = user.id
+    barrier = Barrier(2)
+    sessions = sessionmaker(bind=db_session.get_bind())
+
+    def add(content):
+        session = sessions()
+        try:
+            owned = conversations.get_for_user(session, conversation_id=conversation_id, user_id=user_id)
+            barrier.wait()
+            return conversations.add_message(
+                session, conversation=owned, role="user", content=content, max_messages=1000
+            ).sequence
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        sequences = list(executor.map(add, ["first", "second"]))
+
+    db_session.expire_all()
+    stored = conversations.get_for_user(db_session, conversation_id=conversation_id, user_id=user_id, include_messages=True)
+    assert sorted(sequences) == [1, 2]
+    assert stored.message_count == 2
+    assert [message.sequence for message in stored.messages] == [1, 2]
+    assert stored.last_preview == stored.messages[-1].content
+
+
+def test_concurrent_creates_honor_the_conversation_cap(db_session):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app.models import User
+    from backend.app.repositories import conversations
+
+    user = User(email="create-race@example.com", password_hash="hash", display_name="create-race")
+    db_session.add(user)
+    db_session.commit()
+    user_id = user.id
+    barrier = Barrier(2)
+    sessions = sessionmaker(bind=db_session.get_bind())
+
+    def create(title):
+        session = sessions()
+        try:
+            barrier.wait()
+            return conversations.create_for_user(
+                session, user_id=user_id, title=title, city="", max_conversations=1
+            ).id
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(create, title) for title in ["one", "two"]]
+    outcomes = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except conversations.ConversationLimitReached:
+            outcomes.append("limited")
+
+    assert outcomes.count("limited") == 1
+    assert conversations.count_for_user(db_session, user_id) == 1

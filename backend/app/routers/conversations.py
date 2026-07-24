@@ -64,9 +64,17 @@ def list_conversations(current_user: CurrentUser, db: DbSession) -> list[Convers
 
 @router.post("", response_model=ConversationSummary, status_code=status.HTTP_201_CREATED)
 def create_conversation(payload: ConversationCreate, current_user: CurrentUser, db: DbSession) -> ConversationSummary:
-    if conversations.count_for_user(db, current_user.id) >= MAX_CONVERSATIONS_PER_USER:
+    try:
+        conversation = conversations.create_for_user(
+            db,
+            user_id=current_user.id,
+            title=payload.title,
+            city=payload.city,
+            max_conversations=MAX_CONVERSATIONS_PER_USER,
+        )
+    except conversations.ConversationLimitReached as error:
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Conversation limit reached")
-    return summary_for(conversations.create_for_user(db, user_id=current_user.id, title=payload.title, city=payload.city))
+    return summary_for(conversation)
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
@@ -83,9 +91,17 @@ def update_conversation(conversation_id: str, payload: ConversationUpdate, curre
 @router.post("/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 def create_message(conversation_id: str, payload: MessageCreate, current_user: CurrentUser, db: DbSession) -> MessageResponse:
     conversation = find_or_404(db, current_user, conversation_id)
-    if conversation.message_count >= MAX_MESSAGES_PER_CONVERSATION:
+    try:
+        message = conversations.add_message(
+            db,
+            conversation=conversation,
+            role=payload.role,
+            content=payload.content,
+            max_messages=MAX_MESSAGES_PER_CONVERSATION,
+        )
+    except conversations.MessageLimitReached as error:
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Message limit reached")
-    return message_for(conversations.add_message(db, conversation=conversation, role=payload.role, content=payload.content))
+    return message_for(message)
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -52,3 +52,4 @@ backend/data/*.db-shm
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+backend/pytest-*/
