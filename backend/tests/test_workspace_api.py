@@ -113,6 +113,84 @@ def test_workspace_rejects_oversized_raw_body_even_when_json_is_small(auth_clien
     assert response.status_code == 413
 
 
+def test_workspace_stops_reading_chunked_oversized_body_without_content_length():
+    import asyncio
+
+    from backend.app.main import app
+
+    chunks = [
+        {"type": "http.request", "body": b"{" + (b" " * (3 * 1024 * 1024)), "more_body": True},
+        {"type": "http.request", "body": b" " * (3 * 1024 * 1024), "more_body": True},
+        {"type": "http.request", "body": b"never-read", "more_body": False},
+    ]
+    sent = []
+    receive_calls = 0
+
+    async def receive():
+        nonlocal receive_calls
+        message = chunks[receive_calls]
+        receive_calls += 1
+        return message
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": "/api/workspace",
+        "raw_path": b"/api/workspace",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    asyncio.run(app(scope, receive, send))
+
+    assert sent[0]["status"] == 413
+    assert receive_calls == 2
+
+
+def test_workspace_rejects_oversized_content_length_without_reading_body():
+    import asyncio
+
+    from backend.app.main import app
+
+    sent = []
+    receive_calls = 0
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        raise AssertionError("body must not be read after Content-Length precheck")
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/workspace/import-local",
+        "raw_path": b"/api/workspace/import-local",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json"), (b"content-length", str(5 * 1024 * 1024 + 1).encode())],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    asyncio.run(app(scope, receive, send))
+
+    assert sent[0]["status"] == 413
+    assert receive_calls == 0
+
+
 def test_workspace_rejects_excessive_segments_and_segment_path_points(auth_client):
     too_many_segments = workspace_payload()
     too_many_segments["layers"][0]["routes"][0]["segments"] = [{"path": []}] * 201
