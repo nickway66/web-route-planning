@@ -7,6 +7,7 @@ from .services.ai import request_zhipu_reply
 from .services.amap import AMapClient
 from .services.exports import create_gpx, create_json
 from .services.routes import build_ai_layers, plan_route
+from .routers.auth import router as auth_router
 
 
 app = FastAPI(title="WEBMAP_VS Backend")
@@ -18,6 +19,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 
 
 def amap_client() -> AMapClient:

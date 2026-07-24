@@ -3,6 +3,7 @@ from importlib import import_module
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+from backend.app.config import settings
 from backend.app.database import Base, get_db, make_engine
 
 
@@ -35,6 +36,8 @@ def client(db_session):
     def override_get_db():
         yield db_session
 
+    previous_jwt_secret = settings.jwt_secret
+    settings.jwt_secret = "test-jwt-secret-that-is-at-least-thirty-two-bytes"
     previous_get_db_override = app.dependency_overrides.get(get_db)
     had_get_db_override = get_db in app.dependency_overrides
     app.dependency_overrides[get_db] = override_get_db
@@ -44,3 +47,16 @@ def client(db_session):
         app.dependency_overrides[get_db] = previous_get_db_override
     else:
         app.dependency_overrides.pop(get_db, None)
+    settings.jwt_secret = previous_jwt_secret
+
+
+@pytest.fixture
+def auth_client(client):
+    import uuid
+
+    payload = {"email": f"test-{uuid.uuid4().hex}@example.com", "password": "correct-horse-42"}
+    assert client.post("/api/auth/register", json=payload).status_code == 201
+    login = client.post("/api/auth/login", json=payload)
+    assert login.status_code == 200
+    client.headers.update({"Authorization": f"Bearer {login.json()['accessToken']}"})
+    return client

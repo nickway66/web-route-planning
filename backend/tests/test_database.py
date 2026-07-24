@@ -37,8 +37,8 @@ def test_database_fixture_uses_production_engine_and_loads_models_before_creatin
     assert fixture_source.index('import_module("backend.app.models")') < fixture_source.index("Base.metadata.create_all")
 
 
-def test_database_test_fixtures_exclude_auth_client_until_auth_api_exists():
-    assert not hasattr(conftest, "auth_client")
+def test_database_test_fixtures_include_auth_client_after_auth_api_exists():
+    assert hasattr(conftest, "auth_client")
 
 
 def _client_fixture_with_fake_app(monkeypatch, db_session):
