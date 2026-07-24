@@ -35,6 +35,10 @@ def test_database_fixture_uses_production_engine_and_loads_models_before_creatin
     assert fixture_source.index('import_module("backend.app.models")') < fixture_source.index("Base.metadata.create_all")
 
 
+def test_database_test_fixtures_exclude_auth_client_until_auth_api_exists():
+    assert not hasattr(conftest, "auth_client")
+
+
 def test_gitignore_ignores_sqlite_wal_and_shm_sidecars():
     gitignore = Path(__file__).parents[2] / ".gitignore"
     rules = gitignore.read_text(encoding="utf-8")
