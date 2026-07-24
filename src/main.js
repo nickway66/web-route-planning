@@ -1312,10 +1312,22 @@ function serializeLayersForStorage() {
 }
 
 function persistLayersState() {
-  saveLayerState(serializeLayersForStorage());
-  if (getAuthState().isAuthenticated) {
+  const auth = getAuthState();
+  const userId = auth.isAuthenticated ? String(auth.user?.id || "") : "";
+  saveLayerState(serializeLayersForStorage(), userId);
+  if (auth.isAuthenticated) {
     workspaceSync?.scheduleWorkspaceSave();
   }
+}
+
+function switchLayerCache(userId = "") {
+  state.layers = normalizeLayers(loadLayerState(userId));
+  if (state.selectedLayerId && !state.layers.some((layer) => layer.id === state.selectedLayerId)) {
+    state.selectedLayerId = null;
+  }
+  rebuildLayers();
+  renderLeftPanel();
+  renderRightPanel();
 }
 
 function applyCloudLayers(layers) {
@@ -1329,11 +1341,13 @@ function applyCloudLayers(layers) {
   renderRightPanel();
 }
 
-async function syncWorkspaceAfterLogin() {
+async function syncWorkspaceAfterLogin(anonymousLayers = []) {
   if (!workspaceSync) {
     return;
   }
-  const localLayers = serializeLayersForStorage();
+  const userId = String(getAuthState().user?.id || "");
+  const accountLayers = userId ? serializeLayersForStorage() : [];
+  const localLayers = accountLayers.length ? accountLayers : anonymousLayers;
   const cloudWorkspace = await workspaceSync.loadCloudWorkspace();
   if (!cloudWorkspace || cloudWorkspace.layers?.length || !localLayers.length) {
     return;
@@ -2721,8 +2735,9 @@ async function handleAuthSubmit(form) {
       await register(payload);
     }
     const response = await login(payload);
+    const anonymousLayers = serializeLayersForStorage();
     setAuthSession(response);
-    await syncWorkspaceAfterLogin();
+    await syncWorkspaceAfterLogin(anonymousLayers);
     state.authDialogMode = "";
     state.authPending = false;
     renderAuthDialog();
@@ -4994,6 +5009,9 @@ async function boot() {
   });
   subscribeAuth(() => {
     workspaceSync?.cancelWorkspaceSave();
+    const auth = getAuthState();
+    const userId = auth.isAuthenticated ? String(auth.user?.id || "") : "";
+    switchLayerCache(userId);
     renderAuthEntry();
   });
   applyThemeMode(state.themeMode, false);

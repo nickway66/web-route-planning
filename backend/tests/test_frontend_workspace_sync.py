@@ -86,3 +86,40 @@ def test_workspace_sync_replays_new_generation_after_old_request_finishes():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_workspace_cache_is_scoped_to_the_authenticated_user_and_keeps_anonymous_snapshot():
+    main_source = (ROOT / "src/main.js").read_text(encoding="utf-8")
+    assert "loadLayerState(userId)" in main_source
+    assert "saveLayerState(serializeLayersForStorage(), userId)" in main_source
+    assert "anonymousLayers" in main_source
+
+    node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
+    script = r'''
+      import { readFileSync } from "node:fs";
+
+      const source = readFileSync("./src/storage.js", "utf8").replace(
+        'import { createId } from "./utils";',
+        "const createId = () => 'test-id';"
+      );
+      const cache = new Map();
+      globalThis.localStorage = {
+        getItem: (key) => cache.get(key) ?? null,
+        setItem: (key, value) => cache.set(key, value)
+      };
+      const { loadLayerState, saveLayerState } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+
+      saveLayerState([{ id: "anonymous" }]);
+      saveLayerState([{ id: "account-a" }], "account-a");
+      if (loadLayerState("account-b").length !== 0) throw new Error("account B received account A cache");
+      if (loadLayerState()[0]?.id !== "anonymous") throw new Error("anonymous cache was not preserved");
+      if (loadLayerState("account-a")[0]?.id !== "account-a") throw new Error("account A cache was not isolated");
+    '''
+    result = subprocess.run(
+        [str(node), "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
