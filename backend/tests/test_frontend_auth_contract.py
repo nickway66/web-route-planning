@@ -17,3 +17,12 @@ def test_frontend_exposes_auth_api_and_authorized_request_client():
     assert "export async function apiRequest" in api_client
     assert 'Authorization: `Bearer ${token}`' in api_client
     assert "setUnauthorizedHandler" in api_client
+
+
+def test_export_route_data_reads_raw_response_text_instead_of_json_object():
+    source = (ROOT / "src" / "apiClient.js").read_text(encoding="utf-8")
+    export_block = source[source.index("export async function exportRouteData") :]
+
+    assert "return response.text()" in export_block
+    assert "JSON.stringify(data)" in export_block
+    assert "return apiRequest(`/api/exports/${format}`" not in export_block

@@ -7,7 +7,7 @@ export function setUnauthorizedHandler(handler) {
   unauthorizedHandler = typeof handler === "function" ? handler : null;
 }
 
-export async function apiRequest(path, options = {}) {
+async function fetchApiResponse(path, options = {}) {
   const { token } = getAuthState();
   const response = await fetch(`${BACKEND_BASE_URL}${path}`, {
     ...options,
@@ -18,21 +18,25 @@ export async function apiRequest(path, options = {}) {
     }
   });
 
-  if (!response.ok) {
-    let message = `请求失败（${response.status}）`;
-    try {
-      const data = await response.json();
-      message = data?.detail || message;
-    } catch (error) {
-      const text = await response.text().catch(() => "");
-      message = text || message;
-    }
-    if (response.status === 401) {
-      unauthorizedHandler?.();
-    }
-    throw new Error(message);
-  }
+  if (!response.ok) await throwRequestError(response);
+  return response;
+}
 
+async function throwRequestError(response) {
+  let message = `请求失败（${response.status}）`;
+  try {
+    const data = await response.json();
+    message = data?.detail || message;
+  } catch (error) {
+    const text = await response.text().catch(() => "");
+    message = text || message;
+  }
+  if (response.status === 401) unauthorizedHandler?.();
+  throw new Error(message);
+}
+
+export async function apiRequest(path, options = {}) {
+  const response = await fetchApiResponse(path, options);
   const contentType = response.headers.get("content-type") || "";
   return contentType.includes("application/json") ? response.json() : response.text();
 }
@@ -66,6 +70,15 @@ export function buildAIRoutes(payload) {
   return apiRequest("/api/routes/ai-build", { method: "POST", body: JSON.stringify(payload) });
 }
 
-export function exportRouteData(format, layers) {
-  return apiRequest(`/api/exports/${format}`, { method: "POST", body: JSON.stringify({ layers }) });
+export async function exportRouteData(format, layers) {
+  const response = await fetchApiResponse(`/api/exports/${format}`, {
+    method: "POST",
+    body: JSON.stringify({ layers })
+  });
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const data = await response.json();
+    return JSON.stringify(data);
+  }
+  return response.text();
 }
