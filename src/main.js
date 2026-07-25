@@ -1201,7 +1201,8 @@ const state = {
   pointSortable: null,
   pendingPointOrders: {},
   authDialogMode: "",
-  authPending: false
+  authPending: false,
+  authRequired: false
 };
 
 function createEmptyDraft() {
@@ -2968,16 +2969,22 @@ function renderAuthDialog() {
   if (!dialog) {
     return;
   }
-  if (!state.authDialogMode) {
+  const required = state.authRequired;
+  const appShell = document.querySelector(".app-shell");
+  appShell?.toggleAttribute("inert", required);
+  if (!state.authDialogMode && !required) {
     dialog.className = "auth-dialog hidden";
     dialog.innerHTML = "";
     return;
   }
+  if (required && !state.authDialogMode) {
+    state.authDialogMode = "login";
+  }
   const isRegister = state.authDialogMode === "register";
-  dialog.className = "auth-dialog";
+  dialog.className = `auth-dialog${required ? " auth-required" : ""}`;
   dialog.innerHTML = `
     <form class="auth-card" data-auth-form="${state.authDialogMode}">
-      <button data-auth-action="close" class="icon-tool-btn auth-close" type="button" aria-label="关闭">×</button>
+      ${required ? "" : '<button data-auth-action="close" class="icon-tool-btn auth-close" type="button" aria-label="关闭">×</button>'}
       <h2>${isRegister ? "创建账户" : "登录账户"}</h2>
       <p>${isRegister ? "注册后可在设备间同步路线和会话。" : "登录后可恢复你的云端路线和会话。"}</p>
       <label>邮箱<input name="email" type="email" required autocomplete="email" /></label>
@@ -2988,7 +2995,8 @@ function renderAuthDialog() {
     </form>`;
 }
 
-function openAuthDialog(mode) {
+function openAuthDialog(mode, { required = state.authRequired } = {}) {
+  state.authRequired = Boolean(required);
   state.authDialogMode = mode;
   state.authPending = false;
   renderAuthDialog();
@@ -3005,6 +3013,7 @@ async function handleAuthSubmit(form) {
     }
     const response = await login(payload);
     const anonymousLayers = serializeLayersForStorage();
+    state.authRequired = false;
     setAuthSession(response);
     await syncWorkspaceAfterLogin(anonymousLayers);
     state.authDialogMode = "";
@@ -5168,6 +5177,7 @@ function bindEvents() {
     const action = event.target.closest("[data-auth-action]")?.dataset.authAction;
     if (action === "logout") {
       clearAuthSession();
+      openAuthDialog("login", { required: true });
       setToast("已退出登录，本地路线和历史记录保持不变。", "success");
       return;
     }
@@ -5176,6 +5186,7 @@ function bindEvents() {
   authDialog?.addEventListener("click", (event) => {
     const action = event.target.closest("[data-auth-action]")?.dataset.authAction;
     if (action === "close") {
+      if (state.authRequired) return;
       state.authDialogMode = "";
       renderAuthDialog();
     } else if (action === "switch") {
@@ -5188,6 +5199,12 @@ function bindEvents() {
     event.preventDefault();
     handleAuthSubmit(form);
   });
+  document.addEventListener("keydown", (event) => {
+    if (state.authRequired && event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
   aiRouteNotice?.addEventListener("click", (event) => {
     const target = event.target.closest("[data-action='close-ai-route-notice']");
     if (!target || !aiRouteNotice.contains(target)) {
@@ -5284,7 +5301,13 @@ async function boot() {
     switchLayerCache(userId);
     void switchAIConversationStore();
     renderAuthEntry();
+    if (!auth.isAuthenticated) {
+      openAuthDialog("login", { required: true });
+    }
   });
+  if (!getAuthState().isAuthenticated) {
+    openAuthDialog("login", { required: true });
+  }
   applyThemeMode(state.themeMode, false);
   renderLeftPanel();
   renderRightPanel();

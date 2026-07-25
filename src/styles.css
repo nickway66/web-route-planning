@@ -1350,6 +1350,10 @@ label {
   display: none;
 }
 
+.auth-dialog.auth-required {
+  cursor: default;
+}
+
 .auth-card {
   position: relative;
   display: grid;
