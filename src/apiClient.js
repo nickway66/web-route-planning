@@ -20,6 +20,7 @@ async function fetchApiResponse(path, options = {}) {
       }
     });
   } catch (error) {
+    if (error?.name === "AbortError") throw error;
     throw new Error("无法连接认证服务，请确认后端已启动");
   }
 
