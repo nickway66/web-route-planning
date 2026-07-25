@@ -1,8 +1,20 @@
 from pathlib import Path
+import os
 import subprocess
+import shutil
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_frontend_runtime_contract_does_not_hardcode_a_developer_node_path():
+    source = Path(__file__).read_text(encoding="utf-8")
+
+    node_assignments = [line for line in source.splitlines() if "node =" in line]
+    assert all("Users" not in line for line in node_assignments)
+    assert "shutil.which(\"node\")" in source
 
 
 def test_frontend_exposes_auth_api_and_authorized_request_client():
@@ -31,7 +43,9 @@ def test_export_route_data_preserves_exact_server_response_text_for_every_format
 
 
 def test_api_client_distinguishes_network_failures_from_aborted_or_http_requests():
-    node = Path(r"C:\Users\wade\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe")
+    node = os.environ.get("NODE_BINARY") or shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required to run the frontend API client contract test")
     script = r'''
       import { readFileSync } from "node:fs";
 
