@@ -5092,7 +5092,7 @@ function keepFocusInRequiredAuthDialog(event) {
   const currentIndex = focusable.indexOf(document.activeElement);
   if (currentIndex < 0) {
     event.preventDefault();
-    focusable[0].focus();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
     return;
   }
   const nextIndex = event.shiftKey ? currentIndex - 1 : currentIndex + 1;

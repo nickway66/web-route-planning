@@ -59,6 +59,16 @@ def test_required_auth_dialog_keeps_tab_focus_inside_without_inert_support():
     assert "keepFocusInRequiredAuthDialog(event);" in bind_events
 
 
+def test_required_auth_dialog_uses_the_last_control_for_shift_tab_from_background_focus():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    focus_guard = function_block(source, "keepFocusInRequiredAuthDialog", "bindEvents")
+    background_fallback = focus_guard[
+        focus_guard.index("if (currentIndex < 0)") : focus_guard.index("const nextIndex", focus_guard.index("if (currentIndex < 0)"))
+    ]
+
+    assert "event.shiftKey ? focusable.length - 1 : 0" in background_fallback
+
+
 def test_successful_authentication_and_logout_toggle_the_gate():
     source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
     submit_handler = function_block(source, "handleAuthSubmit", "buildLayout")
