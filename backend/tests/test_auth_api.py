@@ -54,10 +54,29 @@ def test_register_returns_conflict_and_rolls_back_when_email_unique_constraint_r
 
 def test_register_validates_email_and_password_length(client):
     invalid_email = client.post("/api/auth/register", json={"email": "not-an-email", "password": "correct-horse-42"})
-    short_password = client.post("/api/auth/register", json={"email": "user@example.com", "password": "too-short"})
+    short_password = client.post("/api/auth/register", json={"email": "user@example.com", "password": "too-shr"})
 
     assert invalid_email.status_code == 422
     assert short_password.status_code == 422
+
+
+def test_register_accepts_an_eight_character_password(client):
+    response = client.post(
+        "/api/auth/register",
+        json={"email": "eight@example.com", "password": "password"},
+    )
+
+    assert response.status_code == 201
+
+
+def test_register_rejects_a_seven_character_password(client):
+    response = client.post(
+        "/api/auth/register",
+        json={"email": "seven@example.com", "password": "passwrd"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["ctx"]["min_length"] == 8
 
 
 def test_login_returns_bearer_token_and_me_returns_public_user(client):
