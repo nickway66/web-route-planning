@@ -2964,6 +2964,15 @@ function renderAuthEntry() {
   container.innerHTML = `<button data-auth-action="login" class="btn ghost" type="button">登录</button><button data-auth-action="register" class="btn soft" type="button">注册</button>`;
 }
 
+function focusAuthDialogEmail(dialog) {
+  window.requestAnimationFrame(() => {
+    const emailInput = dialog.querySelector('input[name="email"]');
+    if (emailInput && state.authDialogMode && document.contains(emailInput)) {
+      emailInput.focus();
+    }
+  });
+}
+
 function renderAuthDialog() {
   const dialog = document.getElementById("auth-dialog");
   if (!dialog) {
@@ -2972,6 +2981,7 @@ function renderAuthDialog() {
   const required = state.authRequired;
   const appShell = document.querySelector(".app-shell");
   appShell?.toggleAttribute("inert", required);
+  appShell?.setAttribute("aria-hidden", String(required));
   if (!state.authDialogMode && !required) {
     dialog.className = "auth-dialog hidden";
     dialog.innerHTML = "";
@@ -2983,9 +2993,9 @@ function renderAuthDialog() {
   const isRegister = state.authDialogMode === "register";
   dialog.className = `auth-dialog${required ? " auth-required" : ""}`;
   dialog.innerHTML = `
-    <form class="auth-card" data-auth-form="${state.authDialogMode}">
+    <form class="auth-card" data-auth-form="${state.authDialogMode}" role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title">
       ${required ? "" : '<button data-auth-action="close" class="icon-tool-btn auth-close" type="button" aria-label="关闭">×</button>'}
-      <h2>${isRegister ? "创建账户" : "登录账户"}</h2>
+      <h2 id="auth-dialog-title">${isRegister ? "创建账户" : "登录账户"}</h2>
       <p>${isRegister ? "注册后可在设备间同步路线和会话。" : "登录后可恢复你的云端路线和会话。"}</p>
       <label>邮箱<input name="email" type="email" required autocomplete="email" /></label>
       <label>密码（至少 8 位）<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="${isRegister ? "new-password" : "current-password"}" /></label>
@@ -2993,6 +3003,7 @@ function renderAuthDialog() {
       <button class="btn primary" type="submit" ${state.authPending ? "disabled" : ""}>${state.authPending ? "处理中…" : isRegister ? "注册并登录" : "登录"}</button>
       <button data-auth-action="switch" class="btn ghost" type="button">${isRegister ? "已有账户？去登录" : "没有账户？去注册"}</button>
     </form>`;
+  focusAuthDialogEmail(dialog);
 }
 
 function openAuthDialog(mode, { required = state.authRequired } = {}) {
@@ -5065,6 +5076,32 @@ function handleSearchResultAction(event) {
   }
 }
 
+function keepFocusInRequiredAuthDialog(event) {
+  if (!state.authRequired || event.key !== "Tab") {
+    return;
+  }
+  const dialog = document.getElementById("auth-dialog");
+  if (!dialog || dialog.classList.contains("hidden")) {
+    return;
+  }
+  const focusable = Array.from(dialog.querySelectorAll("input:not([disabled]), button:not([disabled])"));
+  if (!focusable.length) {
+    event.preventDefault();
+    return;
+  }
+  const currentIndex = focusable.indexOf(document.activeElement);
+  if (currentIndex < 0) {
+    event.preventDefault();
+    focusable[0].focus();
+    return;
+  }
+  const nextIndex = event.shiftKey ? currentIndex - 1 : currentIndex + 1;
+  if (nextIndex < 0 || nextIndex >= focusable.length) {
+    event.preventDefault();
+    focusable[event.shiftKey ? focusable.length - 1 : 0].focus();
+  }
+}
+
 function bindEvents() {
   const leftPanel = document.getElementById("left-panel");
   const rightPanel = document.getElementById("right-panel");
@@ -5200,6 +5237,7 @@ function bindEvents() {
     handleAuthSubmit(form);
   });
   document.addEventListener("keydown", (event) => {
+    keepFocusInRequiredAuthDialog(event);
     if (state.authRequired && event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();

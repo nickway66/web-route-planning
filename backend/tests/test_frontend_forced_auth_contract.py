@@ -34,6 +34,31 @@ def test_auth_dialog_cannot_be_dismissed_while_authentication_is_required():
     assert "state.authRequired" in bind_events
 
 
+def test_required_auth_dialog_has_modal_semantics_and_receives_focus():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    render_dialog = function_block(source, "renderAuthDialog", "openAuthDialog")
+
+    assert 'role="dialog"' in render_dialog
+    assert 'aria-modal="true"' in render_dialog
+    assert 'aria-labelledby="auth-dialog-title"' in render_dialog
+    assert '<h2 id="auth-dialog-title">' in render_dialog
+    assert "focusAuthDialogEmail(dialog);" in render_dialog
+    assert 'input[name="email"]' in source
+    assert ".focus()" in source
+
+
+def test_required_auth_dialog_keeps_tab_focus_inside_without_inert_support():
+    source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
+    render_dialog = function_block(source, "renderAuthDialog", "openAuthDialog")
+    bind_events = function_block(source, "bindEvents", "boot")
+
+    assert 'appShell?.setAttribute("aria-hidden", String(required));' in render_dialog
+    assert "function keepFocusInRequiredAuthDialog" in source
+    assert "event.key !== \"Tab\"" in source
+    assert "event.shiftKey" in source
+    assert "keepFocusInRequiredAuthDialog(event);" in bind_events
+
+
 def test_successful_authentication_and_logout_toggle_the_gate():
     source = (ROOT / "src" / "main.js").read_text(encoding="utf-8")
     submit_handler = function_block(source, "handleAuthSubmit", "buildLayout")
