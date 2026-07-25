@@ -9,14 +9,20 @@ export function setUnauthorizedHandler(handler) {
 
 async function fetchApiResponse(path, options = {}) {
   const { token } = getAuthState();
-  const response = await fetch(`${BACKEND_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {})
-    }
-  });
+  let response;
+  try {
+    response = await fetch(`${BACKEND_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {})
+      }
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw new Error("无法连接认证服务，请确认后端已启动");
+  }
 
   if (!response.ok) await throwRequestError(response);
   return response;

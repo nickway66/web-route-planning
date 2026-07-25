@@ -17,11 +17,11 @@ class EmailRequest(AuthModel):
 
 
 class RegisterRequest(EmailRequest):
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class LoginRequest(EmailRequest):
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class UserResponse(AuthModel):
