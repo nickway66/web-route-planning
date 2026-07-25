@@ -27,3 +27,11 @@ def test_export_route_data_preserves_exact_server_response_text_for_every_format
     assert "response.json()" not in export_block
     assert "JSON.stringify(data)" not in export_block
     assert "return apiRequest(`/api/exports/${format}`" not in export_block
+
+
+def test_api_client_reports_a_clear_message_when_the_auth_service_is_unreachable():
+    source = (ROOT / "src" / "apiClient.js").read_text(encoding="utf-8")
+
+    assert "无法连接认证服务，请确认后端已启动" in source
+    assert "catch (error)" in source
+    assert "if (!response.ok) await throwRequestError(response);" in source
