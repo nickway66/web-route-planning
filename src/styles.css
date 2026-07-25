@@ -1320,6 +1320,86 @@ label {
   padding: 6px 10px;
 }
 
+.auth-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-user {
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(2, 9, 24, 0.58);
+  backdrop-filter: blur(6px);
+}
+
+.auth-dialog.hidden {
+  display: none;
+}
+
+.auth-card {
+  position: relative;
+  display: grid;
+  width: min(100%, 380px);
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  background: var(--surface-card-strong);
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.4);
+}
+
+.auth-card h2,
+.auth-card p {
+  margin: 0;
+}
+
+.auth-card p {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.auth-card label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.auth-card input {
+  width: 100%;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--text);
+  background: var(--surface-input);
+}
+
+.auth-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+.auth-error {
+  min-height: 1.2em;
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
 @media (max-width: 1280px) {
   .app-shell {
     grid-template-columns: 285px minmax(420px, 1fr);

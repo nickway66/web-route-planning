@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import settings
 from .schemas import AIBuildRequest, AIChatRequest, AIChatResponse, ExportRequest, PlanRouteRequest, PlanRouteResponse
@@ -7,10 +8,83 @@ from .services.ai import request_zhipu_reply
 from .services.amap import AMapClient
 from .services.exports import create_gpx, create_json
 from .services.routes import build_ai_layers, plan_route
+from .routers.auth import router as auth_router
+from .routers.conversations import router as conversations_router
+from .routers.workspace import router as workspace_router
+from .workspace_schemas import MAX_BODY_BYTES
 
 
 app = FastAPI(title="WEBMAP_VS Backend")
 
+
+class WorkspaceBodyLimitMiddleware:
+    """Reject oversized workspace requests before Starlette aggregates their body."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or (path != "/api/workspace" and not path.startswith("/api/workspace/"))
+            or scope["method"] not in {"POST", "PUT"}
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_BODY_BYTES:
+                    await self._send_too_large(send)
+                    return
+            except ValueError:
+                pass
+
+        received_bytes = 0
+        exceeded = False
+        rejection_sent = False
+
+        async def limited_receive() -> Message:
+            nonlocal exceeded, received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > MAX_BODY_BYTES:
+                    exceeded = True
+                    # End the body normally so downstream request parsing cannot raise
+                    # ClientDisconnect; its response is replaced with the single 413 below.
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def limited_send(message: Message) -> None:
+            nonlocal rejection_sent
+            if not exceeded:
+                await send(message)
+                return
+            if not rejection_sent and message["type"] == "http.response.start":
+                rejection_sent = True
+                await self._send_too_large(send)
+
+        await self.app(scope, limited_receive, limited_send)
+        if exceeded and not rejection_sent:
+            await self._send_too_large(send)
+
+    @staticmethod
+    async def _send_too_large(send: Send) -> None:
+        body = b'{"detail":"Workspace exceeds 5 MiB"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+app.add_middleware(WorkspaceBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -18,6 +92,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+app.include_router(conversations_router, prefix="/api/conversations", tags=["conversations"])
+app.include_router(workspace_router, prefix="/api/workspace", tags=["workspace"])
 
 
 def amap_client() -> AMapClient:

@@ -173,6 +173,17 @@ export async function renameAIConversation(id, title) {
   return upsertAIConversation({ ...conversation, title: String(title || "").trim() || conversation.title });
 }
 
+export async function updateAIConversation(id, changes = {}) {
+  const conversation = await getAIConversation(id);
+  if (!conversation) return null;
+  return upsertAIConversation({
+    ...conversation,
+    ...changes,
+    title: String(changes.title ?? conversation.title).trim() || conversation.title,
+    updatedAt: now()
+  });
+}
+
 export async function deleteAIConversation(id) {
   if (!id) return null;
   const db = await openDB();

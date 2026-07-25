@@ -3,6 +3,11 @@ import { createId } from "./utils";
 const STORAGE_KEY = "webmap_routes_v1";
 const LAYER_STATE_KEY = "webmap_layers_v2";
 
+function getLayerStateKey(userId = "") {
+  const normalizedUserId = String(userId || "").trim();
+  return normalizedUserId ? `${LAYER_STATE_KEY}_user_${encodeURIComponent(normalizedUserId)}` : LAYER_STATE_KEY;
+}
+
 export function loadHistoryRoutes() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -52,9 +57,9 @@ export function removeHistoryRoute(routeId) {
   return routes;
 }
 
-export function loadLayerState() {
+export function loadLayerState(userId = "") {
   try {
-    const raw = localStorage.getItem(LAYER_STATE_KEY);
+    const raw = localStorage.getItem(getLayerStateKey(userId));
     if (!raw) {
       return [];
     }
@@ -66,9 +71,9 @@ export function loadLayerState() {
   }
 }
 
-export function saveLayerState(layers) {
+export function saveLayerState(layers, userId = "") {
   try {
-    localStorage.setItem(LAYER_STATE_KEY, JSON.stringify(layers));
+    localStorage.setItem(getLayerStateKey(userId), JSON.stringify(layers));
   } catch (error) {
     console.warn("保存图层缓存失败", error);
   }

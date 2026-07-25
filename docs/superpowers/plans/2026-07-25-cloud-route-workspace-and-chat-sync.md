@@ -13,6 +13,7 @@
 ## File structure
 
 - Create: `backend/app/database.py` — engine、会话工厂、Base、SQLite PRAGMA 和 `get_db`。
+- Create: `backend/tests/conftest.py` — 未认证的 API 数据库测试夹具。
 - Create: `backend/app/models/__init__.py`、`user.py`、`workspace.py`、`conversation.py` — SQLAlchemy 表模型。
 - Create: `backend/app/repositories/__init__.py`、`users.py`、`workspaces.py`、`conversations.py` — 仅封装所属资源的数据库读写。
 - Create: `backend/app/security.py`、`backend/app/dependencies/auth.py` — 密码/JWT 与当前用户依赖。
@@ -32,6 +33,7 @@
 - Modify: `.gitignore`
 - Modify: `backend/app/config.py`
 - Create: `backend/app/database.py`
+- Create: `backend/tests/conftest.py`
 - Test: `backend/tests/test_database.py`
 
 - [ ] **Step 1: 写出数据库配置和外键启用的失败测试。**
@@ -86,7 +88,7 @@ Expected: PASS。
 
 - [ ] **Step 5: 建立可复用的 API 数据库测试夹具。**
 
-创建 `backend/tests/conftest.py`，使用 `tmp_path` 创建每个测试会话独立 SQLite 文件；调用 `make_engine()` 和 `Base.metadata.create_all()`；通过 `app.dependency_overrides[get_db]` 提供该测试 Session；使用 `TestClient(app)` 作为 `client` fixture。再提供 `auth_client` fixture：先注册唯一邮箱、登录并给 client 的默认请求头注入 Bearer token。每个测试结束时清空 `dependency_overrides` 并 `Base.metadata.drop_all()`。
+创建 `backend/tests/conftest.py`，使用 `tmp_path` 创建每个测试会话独立 SQLite 文件；调用 `make_engine()` 和 `Base.metadata.create_all()`；通过 `app.dependency_overrides[get_db]` 提供该测试 Session；使用 `TestClient(app)` 作为未认证的 `client` fixture。每个测试结束时清空 `dependency_overrides` 并 `Base.metadata.drop_all()`。
 
 - [ ] **Step 6: 提交基础设施。**
 
@@ -160,6 +162,7 @@ git commit -m "feat: add account workspace and chat models"
 - Create: `backend/app/dependencies/auth.py`
 - Create: `backend/app/routers/auth.py`
 - Modify: `backend/app/main.py`
+- Modify: `backend/tests/conftest.py`
 - Test: `backend/tests/test_auth_api.py`
 
 - [ ] **Step 1: 写出注册、登录与 `/me` 的失败 API 测试。**
@@ -195,7 +198,7 @@ Expected: FAIL，因为认证路由不存在。
 
 - [ ] **Step 4: 在应用注册路由并通过测试。**
 
-在 `backend/app/main.py` 添加 `app.include_router(auth_router, prefix="/api/auth", tags=["auth"])`，不改现有地图/AI endpoint。
+在 `backend/app/main.py` 添加 `app.include_router(auth_router, prefix="/api/auth", tags=["auth"])`，不改现有地图/AI endpoint。认证 API 通过后，在 `backend/tests/conftest.py` 注册 `auth_client` fixture：为每个需要认证的测试注册唯一邮箱、登录，并向该 client 的默认请求头注入 Bearer token。
 
 Run: `$env:PYTHONPATH=(Get-Location); pytest backend/tests/test_auth_api.py -q`
 
@@ -204,7 +207,7 @@ Expected: PASS。
 - [ ] **Step 5: 提交认证能力。**
 
 ```powershell
-git add backend/app/auth_schemas.py backend/app/repositories/__init__.py backend/app/repositories/users.py backend/app/security.py backend/app/dependencies/auth.py backend/app/routers/__init__.py backend/app/routers/auth.py backend/app/main.py backend/tests/test_auth_api.py
+git add backend/app/auth_schemas.py backend/app/repositories/__init__.py backend/app/repositories/users.py backend/app/security.py backend/app/dependencies/auth.py backend/app/routers/__init__.py backend/app/routers/auth.py backend/app/main.py backend/tests/conftest.py backend/tests/test_auth_api.py
 git commit -m "feat: add email authentication API"
 ```
 

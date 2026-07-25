@@ -1,38 +1,48 @@
 import { BACKEND_BASE_URL } from "./config";
+import { getAuthState } from "./authStore";
 
-async function request(path, options = {}) {
+let unauthorizedHandler = null;
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = typeof handler === "function" ? handler : null;
+}
+
+async function fetchApiResponse(path, options = {}) {
+  const { token } = getAuthState();
   const response = await fetch(`${BACKEND_BASE_URL}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {})
     }
   });
 
-  if (!response.ok) {
-    let message = `后端请求失败（${response.status}）`;
-    try {
-      const data = await response.json();
-      message = data?.detail || message;
-    } catch (error) {
-      const text = await response.text().catch(() => "");
-      message = text || message;
-    }
-    throw new Error(message);
-  }
+  if (!response.ok) await throwRequestError(response);
+  return response;
+}
 
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return response.json();
+async function throwRequestError(response) {
+  let message = `请求失败（${response.status}）`;
+  try {
+    const data = await response.json();
+    message = data?.detail || message;
+  } catch (error) {
+    const text = await response.text().catch(() => "");
+    message = text || message;
   }
-  return response.text();
+  if (response.status === 401) unauthorizedHandler?.();
+  throw new Error(message);
+}
+
+export async function apiRequest(path, options = {}) {
+  const response = await fetchApiResponse(path, options);
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json") ? response.json() : response.text();
 }
 
 export function chatWithAI(messages) {
-  return request("/api/ai/chat", {
-    method: "POST",
-    body: JSON.stringify({ messages })
-  });
+  return apiRequest("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages }) });
 }
 
 export function searchPOI(keyword, options = {}) {
@@ -41,43 +51,29 @@ export function searchPOI(keyword, options = {}) {
     preferred_city: options.preferredCity || "",
     use_map_city: options.useMapCity === false ? "false" : "true"
   });
-  return request(`/api/pois/search?${params.toString()}`);
+  return apiRequest(`/api/pois/search?${params.toString()}`);
 }
 
 export function getSearchSuggestions(keyword, options = {}) {
-  const params = new URLSearchParams({
-    keyword,
-    preferred_city: options.preferredCity || ""
-  });
-  return request(`/api/pois/suggest?${params.toString()}`);
+  const params = new URLSearchParams({ keyword, preferred_city: options.preferredCity || "" });
+  return apiRequest(`/api/pois/suggest?${params.toString()}`);
 }
 
 export function planRoute(points, segmentModes, transitCity) {
-  return request("/api/routes/plan", {
+  return apiRequest("/api/routes/plan", {
     method: "POST",
     body: JSON.stringify({ points, segmentModes, transitCity })
   });
 }
 
 export function buildAIRoutes(payload) {
-  return request("/api/routes/ai-build", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
+  return apiRequest("/api/routes/ai-build", { method: "POST", body: JSON.stringify(payload) });
 }
 
-export function exportRouteData(format, layers) {
-  return fetch(`${BACKEND_BASE_URL}/api/exports/${format}`, {
+export async function exportRouteData(format, layers) {
+  const response = await fetchApiResponse(`/api/exports/${format}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
     body: JSON.stringify({ layers })
-  }).then(async (response) => {
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(text || `后端导出失败（${response.status}）`);
-    }
-    return text;
   });
+  return response.text();
 }
